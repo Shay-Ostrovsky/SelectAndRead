@@ -15,6 +15,12 @@ import sounddevice as sd
 import torch
 try:
     import espeakng_loader
+    import glob as _gl
+    _pkg = os.path.dirname(os.path.abspath(espeakng_loader.__file__))
+    _hits = _gl.glob(os.path.join(_pkg, "**", "phontab"), recursive=True)
+    if _hits:
+        _data_dir = os.path.dirname(_hits[0])
+        espeakng_loader.get_data_path = lambda: _data_dir
     espeakng_loader.make_library_available()
 except Exception:
     pass

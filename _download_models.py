@@ -2,11 +2,21 @@
 Called by setup.bat to download all AI models and voice packs.
 Must run inside the venv after all packages are installed.
 """
+import glob
+import os
 import sys
 
-# Make the espeak-ng DLL findable on Windows before Kokoro/misaki imports it
+# Fix espeakng-loader before Kokoro/misaki imports it.
+# The wheel's get_data_path() returns the CI build path (D:/a/...) which
+# doesn't exist on real machines. Find the actual installed data directory
+# and patch get_data_path so misaki gets the correct path at import time.
 try:
     import espeakng_loader
+    _pkg = os.path.dirname(os.path.abspath(espeakng_loader.__file__))
+    _hits = glob.glob(os.path.join(_pkg, "**", "phontab"), recursive=True)
+    if _hits:
+        _data_dir = os.path.dirname(_hits[0])
+        espeakng_loader.get_data_path = lambda: _data_dir
     espeakng_loader.make_library_available()
 except Exception as e:
     print(f"Warning: espeakng setup: {e}")
