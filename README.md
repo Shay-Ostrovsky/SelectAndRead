@@ -47,6 +47,42 @@ The reader gives you a full timeline scrubber, ±5s skip, 0.5×–2.0× speed, p
 
 ---
 
+## Installation
+
+### Fresh Windows machine
+
+1. Install **Python 3.12** from [python.org](https://python.org) — tick **"Add Python to PATH"** during install
+   > ⚠️ Python 3.13+ is not supported. Use Python 3.10, 3.11, or 3.12.
+2. Download this repo — click **Code → Download ZIP** on GitHub, extract it anywhere
+3. Double-click **`setup.bat`**
+   - It will ask: **"Use GPU? (Y/N)"** — if you have an NVIDIA GPU say Y, otherwise N
+   - It installs all packages and downloads the AI models (~400 MB, takes a few minutes)
+4. Double-click **`run.bat`** to launch
+
+### Already have Anaconda / an existing Python environment
+
+1. Download and extract the ZIP same as above
+2. Double-click **`link_env.bat`** and paste the path to your `pythonw.exe`
+3. Manually install the dependencies in your environment:
+   ```
+   pip install kokoro sounddevice easyocr Pillow keyboard numpy
+   ```
+   And PyTorch separately — CPU:
+   ```
+   pip install torch torchvision torchaudio
+   ```
+   Or GPU (CUDA 12.1):
+   ```
+   pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
+   ```
+4. Double-click **`run.bat`** to launch
+
+### Optional — Desktop shortcut
+
+After setup, right-click **`create_shortcut.ps1`** → **"Run with PowerShell"** to add a **SelectAndRead** shortcut to your Desktop.
+
+---
+
 ## Features
 
 ### Reading experience
@@ -155,24 +191,6 @@ SelectAndRead/
 ```
 
 User settings live at `~/.tts_reader.json`.
-
----
-
-## Installation
-
-### Fresh Windows machine
-
-1. Install **Python 3.12** from [python.org](https://python.org) — tick **"Add Python to PATH"** during install
-   > ⚠️ Python 3.13+ is not supported. Use Python 3.10, 3.11, or 3.12.
-2. Download this repo — click **Code → Download ZIP** on GitHub, extract it anywhere
-3. Double-click **`setup.bat`**
-   - It will ask: **"Use GPU? (Y/N)"** — if you have an NVIDIA GPU say Y, otherwise N
-   - It installs all packages and downloads the AI models (~400 MB, takes a few minutes)
-4. Double-click **`run.bat`** to launch
-
-### Optional — Desktop shortcut
-
-After setup, right-click **`create_shortcut.ps1`** → **"Run with PowerShell"** to add a **SelectAndRead** shortcut to your Desktop.
 
 ---
 
