@@ -1,47 +1,105 @@
+<div align="center">
+
 # SelectAndRead
 
-Select any region of your screen and have it read aloud — with word-by-word highlighting, a full playback timeline, speed control, and audio export.
+### Drag a box on your screen. Hear it read aloud — with the words highlighted as they're spoken.
+
+A desktop OCR + neural-TTS pipeline with synchronized word highlighting, frame-accurate scrubbing, perceptually-optimized auto-highlight colors, and audio export. Pure Python, runs locally, no cloud.
+
+[![Python](https://img.shields.io/badge/python-3.10--3.12-3776AB?logo=python&logoColor=white)](https://python.org)
+[![PyTorch](https://img.shields.io/badge/PyTorch-EE4C2C?logo=pytorch&logoColor=white)](https://pytorch.org)
+[![Kokoro](https://img.shields.io/badge/TTS-Kokoro--82M-FF6B6B)](https://huggingface.co/hexgrad/Kokoro-82M)
+[![EasyOCR](https://img.shields.io/badge/OCR-EasyOCR-4CAF50)](https://github.com/JaidedAI/EasyOCR)
+[![Platform](https://img.shields.io/badge/platform-Windows-0078D6?logo=windows&logoColor=white)](#)
+[![License](https://img.shields.io/badge/license-MIT-blue.svg)](#license)
+[![CUDA](https://img.shields.io/badge/CUDA-optional-76B900?logo=nvidia&logoColor=white)](#)
+
+</div>
+
+---
+
+## Why SelectAndRead
+
+Most TTS tools want you to copy-paste text. That's fine for a Word doc — useless for a PDF figure caption, a UI screenshot, a YouTube subtitle, a cropped journal page, or anything else where the text isn't selectable. SelectAndRead works on **anything you can see on your screen.**
+
+**Built for:**
+- 📄 **Reading PDFs and papers** — including scanned ones where text isn't selectable
+- ♿ **Accessibility** — low-vision users, dyslexia support, eye strain relief
+- 🌍 **Language learners** — hear native pronunciation of any English text on the screen
+- 💻 **Developers** — hands-free reading of long documentation or error logs
+- 🧠 **Multitasking** — turn anything visible into a podcast in two seconds
+
+Everything runs **100% locally**. No accounts, no API keys, no text leaves your machine.
 
 ---
 
 ## How It Works
 
-1. Press the global hotkey (default **Shift+Z**) from anywhere on your desktop
-2. Drag to select any region of the screen
-3. OCR extracts the text, the neural TTS model generates speech
-4. A reader window opens — synchronized word highlighting follows the audio in real time
+```
+1.  Press global hotkey (Shift+Z)         from anywhere on the desktop
+2.  Drag a rectangle                       across the region you want read
+3.  EasyOCR extracts text + per-word boxes from the screenshot
+4.  Kokoro-82M generates speech            with word-level timestamps
+5.  A reader window opens                  highlighting each word as it's spoken
+```
+
+The reader gives you a full timeline scrubber, ±5s skip, 0.5×–2.0× speed, pause/resume, and a one-click WAV export.
 
 ---
 
 ## Features
 
-- **Word-by-word highlight** — each word lights up exactly as it's spoken
-- **Full playback timeline** — scrub to any position, highlights update instantly
-- **Speed control** — 0.5× to 2.0× without re-generating audio (samplerate trick)
-- **Skip forward / backward** — ±5 seconds via buttons or arrow keys
-- **Global hotkeys** — trigger and pause/resume from anywhere, fully customizable
-- **Auto highlight color** — analyzes the screenshot's background and text colors using WCAG contrast ratios and opponent-channel color science to pick the most perceptually salient highlight
-- **Custom highlight color** — pick your own if you prefer
-- **Text view mode** — show clean OCR text instead of the screenshot
-- **Export to WAV** — save the generated audio as a 16-bit 24 kHz WAV file
-- **GPU acceleration** — toggle GPU mode for both OCR and TTS (requires CUDA)
-- **25 English voices** — American and British, male and female (Kokoro voice pack)
-- **Persistent settings** — all preferences saved across launches
+### Reading experience
+- **Word-by-word highlighting** synchronized to audio via Kokoro's per-token timestamps
+- **Frame-accurate timeline scrubber** — instant seek to any position, no thumb-drag lag
+- **Speed control** 0.5× to 2.0× with **no pitch shift and no model re-run** (samplerate trick)
+- **Skip ±5s** via on-screen buttons or arrow keys
+- **Pause/resume** via Space or a global hotkey from anywhere
+- **Text view mode** — render OCR text on a clean background instead of the original screenshot
+
+### Visual quality
+- **Auto highlight color** — picks the most perceptually salient highlight for the detected background and text colors using WCAG contrast ratios and opponent-channel color science
+- **Custom highlight color picker** if you want to override
+- **Per-pixel bbox tightening** so highlights cover only ink, never the whitespace around it
+
+### Voices and audio
+- **25 English voices** — American/British, male/female (Kokoro voice pack)
+- **WAV export** — 16-bit, 24 kHz, ready for podcast feeds or Audacity
+- **GPU acceleration** for both OCR and TTS (toggle from the UI, requires CUDA)
+
+### Quality of life
+- **Global hotkeys** — fully reassignable from the settings dialog with live key capture
+- **Persistent settings** — voice, hotkeys, GPU mode, highlight preferences saved to `~/.tts_reader.json`
+- **DPI-aware** — works correctly on multi-monitor and high-DPI Windows setups
 
 ---
 
-## Technologies
+## Architecture
 
-| Technology | Role |
-|---|---|
-| [Kokoro TTS](https://huggingface.co/hexgrad/Kokoro-82M) | Neural text-to-speech — 82M parameter model with word-level timestamps |
-| [EasyOCR](https://github.com/JaidedAI/EasyOCR) | Deep learning OCR — extracts per-word bounding boxes from screenshots |
-| [PyTorch](https://pytorch.org) | GPU-accelerated inference for both OCR and TTS models |
-| [Pillow (PIL)](https://python-pillow.org) | Screenshot capture, image processing, alpha-composited highlight overlays |
-| [sounddevice](https://python-sounddevice.readthedocs.io) | Low-latency audio playback with samplerate-based speed control |
-| [keyboard](https://github.com/boppreh/keyboard) | System-wide hotkey registration and live key capture |
-| [NumPy](https://numpy.org) | Audio array manipulation, pixel-level bbox tightening, color analysis |
-| [tkinter](https://docs.python.org/3/library/tkinter.html) | Desktop GUI — main panel, reader window, settings dialogs |
+```mermaid
+flowchart LR
+    A[Global Hotkey<br/>Shift+Z] --> B[Region<br/>Selector]
+    B --> C[Screenshot<br/>PIL ImageGrab]
+    C --> D[EasyOCR<br/>per-word bboxes]
+    D --> E1[Pixel-Gap<br/>Word Splitter]
+    D --> E2[BBox<br/>Tightener]
+    E1 & E2 --> F[Sanitized<br/>Token Stream]
+    F --> G[Kokoro-82M<br/>Neural TTS]
+    G --> H[Per-Token<br/>Timestamps]
+    F --> I[Content-Based<br/>OCR→TTS Aligner]
+    H --> I
+    I --> J[Word<br/>Schedule]
+    G --> K[Audio<br/>Buffer]
+    J & K --> L[Reader UI<br/>tkinter Canvas]
+    L --> M[Synchronized<br/>Playback]
+
+    style G fill:#FF6B6B,color:#fff
+    style D fill:#4CAF50,color:#fff
+    style I fill:#FFC107,color:#000
+    style L fill:#2196F3,color:#fff
+```
+
+The core insight is that **OCR words and TTS words don't always align 1:1** — Kokoro occasionally defers tokens (especially around special characters like ®, ©, ™) to a later segment. The aligner solves this by matching on normalized text content rather than on position, with a sequential cursor as a graceful fallback.
 
 ---
 
@@ -67,6 +125,39 @@ When EasyOCR returns multiple words in a single detection chunk, the image strip
 
 ---
 
+## Tech Stack
+
+| Layer | Library | What it does here |
+|---|---|---|
+| **Neural TTS** | [Kokoro-82M](https://huggingface.co/hexgrad/Kokoro-82M) | 82M-parameter open-weights TTS model with per-token timestamps |
+| **OCR** | [EasyOCR](https://github.com/JaidedAI/EasyOCR) | Deep-learning OCR — extracts per-word bounding boxes from screenshots |
+| **Inference runtime** | [PyTorch](https://pytorch.org) | GPU/CPU backend for both OCR and TTS models |
+| **Image processing** | [Pillow (PIL)](https://python-pillow.org) | Screenshot capture, alpha-composited highlight overlays, font rendering |
+| **Audio playback** | [sounddevice](https://python-sounddevice.readthedocs.io) | Low-latency PortAudio bindings, samplerate-based speed control |
+| **Hotkeys** | [keyboard](https://github.com/boppreh/keyboard) | System-wide hotkey hooks and live capture for the settings dialog |
+| **Numerics** | [NumPy](https://numpy.org) | Audio array ops, per-column pixel analysis, color math |
+| **GUI** | [tkinter](https://docs.python.org/3/library/tkinter.html) | Main panel, reader window, settings dialogs (stdlib only — no PyQt) |
+
+---
+
+## Project Structure
+
+```
+SelectAndRead/
+├── main.py                  # Entire app (~1400 lines, single-file)
+├── requirements.txt         # Python dependencies
+├── setup.bat                # First-time setup (venv, packages, model downloads)
+├── run.bat                  # Launcher (no console window)
+├── debug.bat                # Launcher with console for stack traces
+├── link_env.bat             # Hook an existing Python env into run.bat
+├── create_shortcut.ps1      # Add a Desktop shortcut
+└── README.md
+```
+
+User settings live at `~/.tts_reader.json`.
+
+---
+
 ## Installation
 
 ### Fresh Windows machine
@@ -85,20 +176,28 @@ After setup, right-click **`create_shortcut.ps1`** → **"Run with PowerShell"**
 
 ---
 
-## Hotkeys
+## Hotkeys & Configuration
 
-| Action | Default |
-|---|---|
-| Select & Read | Shift+Z |
-| Pause / Resume | Shift+X |
-| Skip forward 5s | → (inside reader) |
-| Skip backward 5s | ← (inside reader) |
-| Pause / Resume | Space (inside reader) |
+| Action | Default | Scope |
+|---|---|---|
+| Select & Read | `Shift+Z` | Global (anywhere on desktop) |
+| Pause / Resume | `Shift+X` | Global |
+| Skip forward 5s | `→` | Reader window |
+| Skip backward 5s | `←` | Reader window |
+| Pause / Resume | `Space` | Reader window |
 
-All hotkeys are reassignable from the **⚙ Settings** dialog.
+All global hotkeys are remappable from the **⚙ Settings** dialog with live key-combination capture.
 
 ---
 
 ## License
 
-MIT
+[MIT](LICENSE) — do whatever you want, attribution appreciated.
+
+---
+
+## Acknowledgments
+
+- **[Kokoro-82M](https://huggingface.co/hexgrad/Kokoro-82M)** by hexgrad — remarkable TTS quality at this parameter count
+- **[EasyOCR](https://github.com/JaidedAI/EasyOCR)** by JaidedAI — robust ready-to-use OCR with bbox output
+- WCAG color-contrast formulas from the W3C Accessibility Guidelines
