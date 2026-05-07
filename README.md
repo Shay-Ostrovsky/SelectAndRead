@@ -49,8 +49,6 @@ The reader gives you a full timeline scrubber, ±5s skip, 0.5×–2.0× speed, p
 
 ## Installation
 
-### Fresh Windows machine
-
 1. Install **Python 3.12** from [python.org](https://python.org) — tick **"Add Python to PATH"** during install
    > ⚠️ Python 3.13+ is not supported. Use Python 3.10, 3.11, or 3.12.
 2. Download this repo — click **Code → Download ZIP** on GitHub, extract it anywhere
@@ -59,9 +57,7 @@ The reader gives you a full timeline scrubber, ±5s skip, 0.5×–2.0× speed, p
    - It installs all packages and downloads the AI models (~400 MB, takes a few minutes)
 4. Double-click **`run.bat`** to launch
 
-### Optional — Desktop shortcut
-
-After setup, right-click **`create_shortcut.ps1`** → **"Run with PowerShell"** to add a **SelectAndRead** shortcut to your Desktop.
+**Optional — Desktop shortcut:** right-click **`create_shortcut.ps1`** → **"Run with PowerShell"** to add a SelectAndRead shortcut to your Desktop.
 
 ---
 
@@ -78,7 +74,7 @@ After setup, right-click **`create_shortcut.ps1`** → **"Run with PowerShell"**
 ### Visual quality
 - **Auto highlight color** — picks the most perceptually salient highlight for the detected background and text colors using WCAG contrast ratios and opponent-channel color science
 - **Custom highlight color picker** if you want to override
-- **Per-pixel bbox tightening** so highlights cover only ink, never the whitespace around it
+- **Tight word highlights** — covers only the letters, never the surrounding whitespace
 
 ### Voices and audio
 - **25 English voices** — American/British, male/female (Kokoro voice pack)
