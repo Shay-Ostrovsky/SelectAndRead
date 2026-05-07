@@ -71,7 +71,8 @@ When EasyOCR returns multiple words in a single detection chunk, the image strip
 
 ### Fresh Windows machine
 
-1. Install Python 3.10+ from [python.org](https://python.org) — tick **"Add Python to PATH"** during install
+1. Install **Python 3.12** from [python.org](https://python.org) — tick **"Add Python to PATH"** during install
+   > ⚠️ Python 3.13+ is not supported. Use Python 3.10, 3.11, or 3.12.
 2. Download this repo — click **Code → Download ZIP** on GitHub, extract it anywhere
 3. Double-click **`setup.bat`**
    - It will ask: **"Use GPU? (Y/N)"** — if you have an NVIDIA GPU say Y, otherwise N
