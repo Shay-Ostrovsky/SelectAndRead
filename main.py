@@ -15,7 +15,10 @@ import sounddevice as sd
 import torch
 try:
     import espeakng_loader
-    espeakng_loader.activate()
+    from phonemizer.backend.espeak.wrapper import EspeakWrapper
+    EspeakWrapper.library_path = espeakng_loader.get_library_path()
+    EspeakWrapper.data_path = espeakng_loader.get_data_path()
+    espeakng_loader.make_library_available()
 except Exception:
     pass
 from kokoro import KPipeline
