@@ -33,6 +33,11 @@ try:
 except Exception:
     pass
 
+try:
+    ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("SelectAndRead.App")
+except Exception:
+    pass
+
 _SETTINGS_PATH = os.path.join(os.path.expanduser("~"), ".tts_reader.json")
 
 VOICES = [
