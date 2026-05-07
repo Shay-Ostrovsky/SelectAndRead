@@ -487,6 +487,9 @@ class App:
         self.root.title("SelectAndRead")
         self.root.resizable(False, False)
         self.root.attributes("-topmost", True)
+        _ico = os.path.join(os.path.dirname(os.path.abspath(__file__)), "icon.ico")
+        if os.path.exists(_ico):
+            self.root.iconbitmap(_ico)
 
         self.stop_event  = threading.Event()
         self._play_event = threading.Event()   # set=playing  clear=paused/stopped

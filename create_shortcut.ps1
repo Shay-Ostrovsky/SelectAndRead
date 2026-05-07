@@ -2,28 +2,28 @@
 # Run once: right-click -> "Run with PowerShell"
 
 $appDir  = $PSScriptRoot
-$runBat  = Join-Path $appDir "run.bat"
+$vbsFile = Join-Path $appDir "_launch.vbs"
 $desktop = [Environment]::GetFolderPath("Desktop")
 $lnkPath = Join-Path $desktop "SelectAndRead.lnk"
+$wscript = "$env:SystemRoot\System32\wscript.exe"
 
-if (-not (Test-Path $runBat)) {
-    Write-Host "ERROR: run.bat not found in $appDir" -ForegroundColor Red
+if (-not (Test-Path $vbsFile)) {
+    Write-Host "ERROR: _launch.vbs not found in $appDir" -ForegroundColor Red
     pause
     exit 1
 }
 
 $shell                     = New-Object -ComObject WScript.Shell
 $shortcut                  = $shell.CreateShortcut($lnkPath)
-$shortcut.TargetPath       = $env:ComSpec
-$shortcut.Arguments        = "/c `"$runBat`""
+$shortcut.TargetPath       = $wscript
+$shortcut.Arguments        = "//B //Nologo `"$vbsFile`""
 $shortcut.WorkingDirectory = $appDir
-$shortcut.WindowStyle      = 7
 $shortcut.Description      = "SelectAndRead"
 $iconIco = Join-Path $appDir "icon.ico"
 if (Test-Path $iconIco) {
     $shortcut.IconLocation = $iconIco
 } else {
-    $shortcut.IconLocation = "$env:ComSpec,0"
+    $shortcut.IconLocation = "$wscript,0"
 }
 $shortcut.Save()
 
