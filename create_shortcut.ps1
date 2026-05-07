@@ -27,7 +27,12 @@ $shortcut.TargetPath       = $pythonw
 $shortcut.Arguments        = "`"$mainFile`""
 $shortcut.WorkingDirectory = $appDir
 $shortcut.Description      = "SelectAndRead"
-$shortcut.IconLocation     = "$pythonw,0"
+$iconPath = Join-Path $appDir "icon.ico"
+if (Test-Path $iconPath) {
+    $shortcut.IconLocation = $iconPath
+} else {
+    $shortcut.IconLocation = "$pythonw,0"
+}
 $shortcut.Save()
 
 Write-Host "Shortcut created at: $lnkPath" -ForegroundColor Green
