@@ -69,48 +69,36 @@ When EasyOCR returns multiple words in a single detection chunk, the image strip
 
 ## Installation
 
-### Requirements
-- Windows 10 / 11
-- Python 3.10 or newer **or** an existing Anaconda / conda environment
+### Fresh Windows machine
 
-### Option 1 — Fresh setup (creates a venv)
+1. Install Python 3.10+ from [python.org](https://python.org) — tick **"Add Python to PATH"** during install
+2. Download this repo — click **Code → Download ZIP** on GitHub, extract it anywhere
+3. Double-click **`setup.bat`**
+   - It will ask: **"Use GPU? (Y/N)"** — if you have an NVIDIA GPU say Y, otherwise N
+   - It installs everything automatically (takes a few minutes on first run)
+4. Double-click **`run.bat`** to launch
 
-```
-setup.bat
-```
+### Already have Anaconda / an existing Python environment
 
-Prompts whether to install GPU (CUDA) or CPU-only PyTorch, then installs all dependencies.
+1. Download and extract the ZIP same as above
+2. Double-click **`link_env.bat`** and paste the path to your `pythonw.exe`
+3. Manually install the dependencies in your environment:
+   ```
+   pip install kokoro sounddevice easyocr Pillow keyboard numpy
+   ```
+   And PyTorch separately — CPU:
+   ```
+   pip install torch torchvision torchaudio
+   ```
+   Or GPU (CUDA 12.1):
+   ```
+   pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
+   ```
+4. Double-click **`run.bat`** to launch
 
-### Option 2 — Link an existing environment
+### Optional — Desktop shortcut
 
-If you already have a Python environment with the dependencies (e.g. a conda env):
-
-```
-link_env.bat
-```
-
-Paste the path to your `pythonw.exe` when prompted. The app will use that environment from then on.
-
-### Launch
-
-```
-run.bat
-```
-
-Or run `create_shortcut.ps1` once to add a **SelectAndRead** shortcut to your Desktop.
-
-### Dependencies
-
-```
-kokoro>=0.9.2
-sounddevice
-easyocr
-Pillow
-keyboard
-numpy
-```
-
-PyTorch is installed separately by `setup.bat` so the correct CPU / CUDA build is chosen for your machine.
+After setup, right-click **`create_shortcut.ps1`** → **"Run with PowerShell"** to add a **SelectAndRead** shortcut to your Desktop.
 
 ---
 
