@@ -76,7 +76,7 @@ When EasyOCR returns multiple words in a single detection chunk, the image strip
 2. Download this repo — click **Code → Download ZIP** on GitHub, extract it anywhere
 3. Double-click **`setup.bat`**
    - It will ask: **"Use GPU? (Y/N)"** — if you have an NVIDIA GPU say Y, otherwise N
-   - It installs everything automatically (takes a few minutes on first run)
+   - It installs all packages and downloads the AI models (~400 MB, takes a few minutes)
 4. Double-click **`run.bat`** to launch
 
 ### Already have Anaconda / an existing Python environment

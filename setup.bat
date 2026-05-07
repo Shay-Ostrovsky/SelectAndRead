@@ -100,6 +100,25 @@ if errorlevel 1 (
 
 echo.
 echo ====================================
+echo  Downloading AI models...
+echo  This may take several minutes
+echo  depending on your internet speed.
+echo  (~400 MB total -- please wait)
+echo ====================================
+echo.
+python -c "import easyocr; easyocr.Reader(['en'], verbose=True)"
+if errorlevel 1 (
+    echo.
+    echo WARNING: EasyOCR model download failed. It will retry on first launch.
+)
+python -c "from kokoro import KPipeline; KPipeline(lang_code='a', repo_id='hexgrad/Kokoro-82M')"
+if errorlevel 1 (
+    echo.
+    echo WARNING: Kokoro model download failed. It will retry on first launch.
+)
+
+echo.
+echo ====================================
 echo  Setup complete!
 echo.
 if /i "%GPU_CHOICE%"=="Y" (
