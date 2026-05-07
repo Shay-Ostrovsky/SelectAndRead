@@ -1,0 +1,6 @@
+kokoro>=0.9.2
+sounddevice
+easyocr
+Pillow
+keyboard
+numpy
