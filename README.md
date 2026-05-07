@@ -6,7 +6,7 @@
 
 A desktop OCR + neural-TTS pipeline with synchronized word highlighting, frame-accurate scrubbing, perceptually-optimized auto-highlight colors, and audio export. Pure Python, runs locally, no cloud.
 
-[![Python](https://img.shields.io/badge/python-3.10--3.12-3776AB?logo=python&logoColor=white)](https://python.org)
+[![Python](https://img.shields.io/badge/python-3.10%2B-3776AB?logo=python&logoColor=white)](https://python.org)
 [![PyTorch](https://img.shields.io/badge/PyTorch-EE4C2C?logo=pytorch&logoColor=white)](https://pytorch.org)
 [![Kokoro](https://img.shields.io/badge/TTS-Kokoro--82M-FF6B6B)](https://huggingface.co/hexgrad/Kokoro-82M)
 [![EasyOCR](https://img.shields.io/badge/OCR-EasyOCR-4CAF50)](https://github.com/JaidedAI/EasyOCR)
@@ -49,8 +49,7 @@ The reader gives you a full timeline scrubber, ±5s skip, 0.5×–2.0× speed, p
 
 ## Installation
 
-1. Install **Python 3.12** from [python.org](https://python.org) — tick **"Add Python to PATH"** during install
-   > ⚠️ Python 3.13+ is not supported. Use Python 3.10, 3.11, or 3.12.
+1. Install **Python 3.10 or newer** from [python.org](https://python.org) — tick **"Add Python to PATH"** during install
 2. Download this repo — click **Code → Download ZIP** on GitHub, extract it anywhere
 3. Double-click **`setup.bat`**
    - It will ask: **"Use GPU? (Y/N)"** — if you have an NVIDIA GPU say Y, otherwise N

@@ -20,11 +20,10 @@ for /f "tokens=2" %%v in ('python --version 2^>^&1') do set PYVER=%%v
 echo Found Python %PYVER%
 echo.
 
-python -c "import sys; exit(0 if (3,10) <= sys.version_info < (3,13) else 1)" >nul 2>&1
+python -c "import sys; exit(0 if sys.version_info >= (3,10) else 1)" >nul 2>&1
 if errorlevel 1 (
     echo ERROR: Python %PYVER% is not supported.
-    echo kokoro requires Python 3.10, 3.11, or 3.12.
-    echo Please install Python 3.12 from https://python.org
+    echo Please install Python 3.10 or newer from https://python.org
     echo Make sure to tick "Add Python to PATH" during install.
     pause
     exit /b 1
