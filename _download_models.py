@@ -4,12 +4,9 @@ Must run inside the venv after all packages are installed.
 """
 import sys
 
-# Fix espeakng path before importing Kokoro
+# Make the espeak-ng DLL findable on Windows before Kokoro/misaki imports it
 try:
     import espeakng_loader
-    from phonemizer.backend.espeak.wrapper import EspeakWrapper
-    EspeakWrapper.library_path = espeakng_loader.get_library_path()
-    EspeakWrapper.data_path = espeakng_loader.get_data_path()
     espeakng_loader.make_library_available()
 except Exception as e:
     print(f"Warning: espeakng setup: {e}")
