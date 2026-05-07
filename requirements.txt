@@ -4,3 +4,5 @@ easyocr
 Pillow
 keyboard
 numpy
+espeakng-loader
+phonemizer
