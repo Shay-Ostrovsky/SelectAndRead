@@ -32,7 +32,11 @@ if not exist "venv" (
     echo Virtual environment already exists, skipping creation.
 )
 
+echo.
+echo Activating virtual environment...
 call venv\Scripts\activate.bat
+
+echo Upgrading pip...
 python -m pip install --upgrade pip --quiet
 
 echo.
@@ -41,25 +45,28 @@ echo (If unsure, choose N -- the app works fine on CPU)
 echo.
 set /p GPU_CHOICE="Use GPU? (Y/N): "
 
-if /i "%GPU_CHOICE%"=="Y" (
-    echo.
-    echo Installing PyTorch with CUDA 12.1 support...
-    echo This is a large download (~2.5 GB) -- please wait.
-    echo.
-    pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
-    if errorlevel 1 (
-        echo.
-        echo WARNING: CUDA PyTorch install failed. Falling back to CPU version.
-        echo Make sure your NVIDIA drivers are up to date, or choose N next time.
-        echo.
-        pip install torch torchvision torchaudio
-    )
-) else (
-    echo.
-    echo Installing PyTorch ^(CPU^)...
-    pip install torch torchvision torchaudio
-)
+if /i "%GPU_CHOICE%"=="Y" goto install_gpu
+goto install_cpu
 
+:install_gpu
+echo.
+echo Installing PyTorch with CUDA 12.1 support...
+echo This is a large download (~2.5 GB) -- please wait.
+echo.
+pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
+if errorlevel 1 (
+    echo.
+    echo WARNING: CUDA install failed. Falling back to CPU version.
+    echo Make sure your NVIDIA drivers are up to date, or choose N next time.
+    echo.
+    goto install_cpu
+)
+goto install_deps
+
+:install_cpu
+echo.
+echo Installing PyTorch (CPU)...
+pip install torch torchvision torchaudio
 if errorlevel 1 (
     echo.
     echo ERROR: PyTorch installation failed.
@@ -67,11 +74,11 @@ if errorlevel 1 (
     exit /b 1
 )
 
+:install_deps
 echo.
 echo Installing remaining dependencies...
 echo.
 pip install -r requirements.txt
-
 if errorlevel 1 (
     echo.
     echo ERROR: Dependency installation failed.
