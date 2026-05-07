@@ -118,6 +118,14 @@ if errorlevel 1 (
 )
 
 echo.
+echo Downloading all voice packs...
+python -c "from kokoro import KPipeline; p=KPipeline(lang_code='a',repo_id='hexgrad/Kokoro-82M'); voices=['af_heart','af_sky','af_bella','af_nova','af_river','af_sarah','af_nicole','af_aoede','af_kore','af_jessica','am_michael','am_adam','am_echo','am_eric','am_liam','am_onyx','am_puck','bf_emma','bf_isabella','bf_alice','bf_lily','bm_george','bm_lewis','bm_daniel']; [next(iter(p('Hi',voice=v)),None) for v in voices]; print('All voices ready.')"
+if errorlevel 1 (
+    echo.
+    echo WARNING: Some voice packs failed to download. They will retry on first use.
+)
+
+echo.
 echo ====================================
 echo  Setup complete!
 echo.
