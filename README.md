@@ -59,24 +59,6 @@ The reader gives you a full timeline scrubber, ±5s skip, 0.5×–2.0× speed, p
    - It installs all packages and downloads the AI models (~400 MB, takes a few minutes)
 4. Double-click **`run.bat`** to launch
 
-### Already have Anaconda / an existing Python environment
-
-1. Download and extract the ZIP same as above
-2. Double-click **`link_env.bat`** and paste the path to your `pythonw.exe`
-3. Manually install the dependencies in your environment:
-   ```
-   pip install kokoro sounddevice easyocr Pillow keyboard numpy
-   ```
-   And PyTorch separately — CPU:
-   ```
-   pip install torch torchvision torchaudio
-   ```
-   Or GPU (CUDA 12.1):
-   ```
-   pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
-   ```
-4. Double-click **`run.bat`** to launch
-
 ### Optional — Desktop shortcut
 
 After setup, right-click **`create_shortcut.ps1`** → **"Run with PowerShell"** to add a **SelectAndRead** shortcut to your Desktop.
