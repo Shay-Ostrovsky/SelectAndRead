@@ -13,6 +13,11 @@ import easyocr
 import numpy as np
 import sounddevice as sd
 import torch
+try:
+    import espeakng_loader
+    espeakng_loader.activate()
+except Exception:
+    pass
 from kokoro import KPipeline
 from PIL import Image, ImageDraw, ImageFont, ImageTk, ImageGrab
 import keyboard
