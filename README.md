@@ -57,7 +57,7 @@ The reader gives you a full timeline scrubber, ±5s skip, 0.5×–2.0× speed, p
    - It installs all packages and downloads the AI models (~400 MB, takes a few minutes)
 4. Double-click **`run.bat`** to launch
 
-**Optional — Desktop shortcut:** right-click **`create_shortcut.ps1`** → **"Run with PowerShell"** to add a SelectAndRead shortcut to your Desktop.
+**Optional — Desktop shortcut:** double-click **`create_shortcut.bat`** to add a SelectAndRead shortcut to your Desktop.
 
 ---
 
