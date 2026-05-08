@@ -33,41 +33,54 @@ $shortcut.Save()
 
 # Stamp AppUserModelID on the shortcut so the pinned button and the
 # running app (which also sets this ID) merge into one taskbar button.
+# Uses the canonical IShellLink + IPersistFile + IPropertyStore approach.
 $aumidOk = $false
 try {
     Add-Type -TypeDefinition @'
 using System;
 using System.Runtime.InteropServices;
+using System.Runtime.InteropServices.ComTypes;
+
+[ComImport, Guid("00021401-0000-0000-C000-000000000046")]
+public class CShellLink { }
+
+[ComImport, Guid("000214F9-0000-0000-C000-000000000046"),
+ InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+public interface IShellLinkW {
+    void Stub00(); void Stub01(); void Stub02(); void Stub03();
+    void Stub04(); void Stub05(); void Stub06(); void Stub07();
+    void Stub08(); void Stub09(); void Stub10(); void Stub11();
+    void Stub12(); void Stub13(); void Stub14(); void Stub15();
+    void Stub16(); void Stub17(); void Stub18(); void Stub19();
+}
 
 [ComImport, Guid("886D8EEB-8CF2-4446-8D02-CDBA1DBDCF99"),
  InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
-interface IPropertyStore {
+public interface IPropertyStore {
     [PreserveSig] int GetCount(out uint c);
     [PreserveSig] int GetAt(uint i, out PKEY k);
     [PreserveSig] int GetValue(ref PKEY k, IntPtr pv);
     [PreserveSig] int SetValue(ref PKEY k, IntPtr pv);
     [PreserveSig] int Commit();
 }
+
 [StructLayout(LayoutKind.Sequential, Pack=4)]
 public struct PKEY { public Guid fmtid; public uint pid; }
+
 public static class Aumid {
-    [DllImport("shell32.dll", CharSet=CharSet.Unicode)]
-    static extern int SHGetPropertyStoreFromParsingName(
-        string path, IntPtr pbc, int flags, ref Guid iid, out IPropertyStore ps);
     [DllImport("ole32.dll")] static extern int PropVariantClear(IntPtr pv);
 
-    static readonly Guid IID_IPropertyStore = new Guid("886D8EEB-8CF2-4446-8D02-CDBA1DBDCF99");
     static PKEY PKEY_AppUserModel_ID = new PKEY {
         fmtid = new Guid("9F4C2855-9F79-4B39-A8D0-E1D42DE1D5F3"), pid = 5
     };
 
     public static bool Set(string path, string id) {
-        var iid = IID_IPropertyStore;
-        IPropertyStore ps;
-        if (SHGetPropertyStoreFromParsingName(path, IntPtr.Zero, 6, ref iid, out ps) != 0)
-            return false;
+        var link = (IShellLinkW)new CShellLink();
+        var pf = (IPersistFile)link;
+        pf.Load(path, 2);  // STGM_READWRITE
+        var ps = (IPropertyStore)link;
 
-        IntPtr pv = Marshal.AllocCoTaskMem(24);
+        IntPtr pv  = Marshal.AllocCoTaskMem(24);
         IntPtr str = IntPtr.Zero;
         bool ok = false;
         try {
@@ -75,21 +88,26 @@ public static class Aumid {
             Marshal.WriteInt16(pv, 0, 31);            // VT_LPWSTR
             str = Marshal.StringToCoTaskMemUni(id);
             Marshal.WriteIntPtr(pv, 8, str);
-            int hr = ps.SetValue(ref PKEY_AppUserModel_ID, pv);
-            if (hr == 0) { ps.Commit(); ok = true; }
+            if (ps.SetValue(ref PKEY_AppUserModel_ID, pv) == 0) {
+                ps.Commit();
+                pf.Save(path, true);
+                ok = true;
+            }
         } finally {
             if (str != IntPtr.Zero) Marshal.FreeCoTaskMem(str);
             Marshal.FreeCoTaskMem(pv);
             Marshal.ReleaseComObject(ps);
+            Marshal.ReleaseComObject(pf);
+            Marshal.ReleaseComObject(link);
         }
         return ok;
     }
 
     public static string Get(string path) {
-        var iid = IID_IPropertyStore;
-        IPropertyStore ps;
-        if (SHGetPropertyStoreFromParsingName(path, IntPtr.Zero, 0, ref iid, out ps) != 0)
-            return null;
+        var link = (IShellLinkW)new CShellLink();
+        var pf   = (IPersistFile)link;
+        pf.Load(path, 0);
+        var ps = (IPropertyStore)link;
         IntPtr pv = Marshal.AllocCoTaskMem(24);
         try {
             for (int i = 0; i < 24; i++) Marshal.WriteByte(pv, i, 0);
@@ -103,6 +121,8 @@ public static class Aumid {
         } finally {
             Marshal.FreeCoTaskMem(pv);
             Marshal.ReleaseComObject(ps);
+            Marshal.ReleaseComObject(pf);
+            Marshal.ReleaseComObject(link);
         }
     }
 }
