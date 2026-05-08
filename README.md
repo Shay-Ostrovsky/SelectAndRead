@@ -65,8 +65,8 @@ The reader gives you a full timeline scrubber, ±5s skip, 0.5×–2.0× speed, p
    - It will ask: **"Use GPU? (Y/N)"** — if you have an NVIDIA GPU say Y, otherwise N
    - It installs all packages and downloads the AI models (~400 MB, takes a few minutes)
 4. Double-click **`run.bat`** to launch
-
-**Optional — Desktop shortcut:** double-click **`create_shortcut.bat`** to add a SelectAndRead shortcut to your Desktop.
+   
+5. Desktop shortcut:** double-click **`create_shortcut.bat`** to add a SelectAndRead shortcut to your Desktop.
 
 ---
 
