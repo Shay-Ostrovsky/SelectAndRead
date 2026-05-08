@@ -2,9 +2,9 @@
 
 # SelectAndRead
 
-### Drag a box on your screen. Hear it read aloud — with the words highlighted as they're spoken.
+### Drag a box on your screen — or paste from your clipboard. Hear it read aloud, with each word highlighted as it's spoken.
 
-A desktop OCR + neural-TTS pipeline with synchronized word highlighting, frame-accurate scrubbing, perceptually-optimized auto-highlight colors, and audio export. Pure Python, runs locally, no cloud.
+A desktop OCR + neural-TTS pipeline with synchronized word highlighting, frame-accurate scrubbing, perceptually-optimized auto-highlight colors, audio export, and proper Windows taskbar integration. Pure Python, runs locally, no cloud.
 
 [![Python](https://img.shields.io/badge/python-3.10--3.12-3776AB?logo=python&logoColor=white)](https://python.org)
 [![PyTorch](https://img.shields.io/badge/PyTorch-EE4C2C?logo=pytorch&logoColor=white)](https://pytorch.org)
@@ -20,7 +20,7 @@ A desktop OCR + neural-TTS pipeline with synchronized word highlighting, frame-a
 
 ## Why SelectAndRead
 
-Most TTS tools want you to copy-paste text. That's fine for a Word doc — useless for a PDF figure caption, a UI screenshot, a YouTube subtitle, a cropped journal page, or anything else where the text isn't selectable. SelectAndRead works on **anything you can see on your screen.**
+Most TTS tools only handle copy-paste. That's fine for a Word doc — useless for a PDF figure caption, a UI screenshot, a YouTube subtitle, a cropped journal page, or anything where the text isn't selectable. SelectAndRead works on **anything you can see on your screen** — and still accepts pasted text or images when that's faster.
 
 **Built for:**
 - 📄 **Reading PDFs and papers** — including scanned ones where text isn't selectable
@@ -35,12 +35,21 @@ Everything runs **100% locally**. No accounts, no API keys, no text leaves your 
 
 ## How It Works
 
+**Drag a region** (`Shift+Z`):
 ```
-1.  Press global hotkey (Shift+Z)         from anywhere on the desktop
+1.  Press the global hotkey                from anywhere on the desktop
 2.  Drag a rectangle                       across the region you want read
-3.  EasyOCR extracts text + per-word boxes from the screenshot
-4.  Kokoro-82M generates speech            with word-level timestamps
-5.  A reader window opens                  highlighting each word as it's spoken
+3.  Image is upscaled + auto-contrasted    so small text is readable
+4.  EasyOCR extracts text + per-word boxes from the screenshot
+5.  Kokoro-82M generates speech            with word-level timestamps
+6.  A reader window opens                  highlighting each word as it's spoken
+```
+
+**Paste anything** (`Ctrl+V` or the Paste button):
+```
+1.  Copy text or a screenshot              from any application
+2.  Paste — text bypasses OCR entirely;    images go through the pipeline above
+3.  Reader opens immediately
 ```
 
 The reader gives you a full timeline scrubber, ±5s skip, 0.5×–2.0× speed, pause/resume, and a one-click WAV export.
@@ -63,6 +72,11 @@ The reader gives you a full timeline scrubber, ±5s skip, 0.5×–2.0× speed, p
 
 ## Features
 
+### Input methods
+- **Drag a screen region** with the global hotkey (works on PDFs, videos, photos, anything visible)
+- **Paste from clipboard** — `Ctrl+V` reads either an image (full OCR pipeline) or text (OCR is skipped entirely)
+- **Smart preprocessing** — small screenshots are auto-upscaled 2× with Lanczos and auto-contrasted before OCR, recovering text the original resolution couldn't see
+
 ### Reading experience
 - **Word-by-word highlighting** synchronized to audio via Kokoro's per-token timestamps
 - **Frame-accurate timeline scrubber** — instant seek to any position, no thumb-drag lag
@@ -81,10 +95,15 @@ The reader gives you a full timeline scrubber, ±5s skip, 0.5×–2.0× speed, p
 - **WAV export** — 16-bit, 24 kHz, ready for podcast feeds or Audacity
 - **GPU acceleration** for both OCR and TTS (toggle from the UI, requires CUDA)
 
+### Native Windows integration
+- **Real `.exe` launcher** built from `_launcher.cs` during setup — proper taskbar icon, no console window, animated splash while models warm up
+- **Pinnable to taskbar** — the desktop shortcut and the running app share an `AppUserModelID`, so a single button works as both launcher and active-window indicator
+- **Animated splash screen** — gold/orange spinning ring with the app icon, transparent background, closes the moment the app window is ready (file-based handshake — no flaky window-title sniffing)
+- **DPI-aware** — works correctly on multi-monitor and high-DPI setups
+
 ### Quality of life
 - **Global hotkeys** — fully reassignable from the settings dialog with live key capture
 - **Persistent settings** — voice, hotkeys, GPU mode, highlight preferences saved to `~/.tts_reader.json`
-- **DPI-aware** — works correctly on multi-monitor and high-DPI Windows setups
 
 ---
 
@@ -92,9 +111,13 @@ The reader gives you a full timeline scrubber, ±5s skip, 0.5×–2.0× speed, p
 
 ```mermaid
 flowchart LR
-    A[Global Hotkey<br/>Shift+Z] --> B[Region<br/>Selector]
+    A1[Global Hotkey<br/>Shift+Z] --> B[Region<br/>Selector]
+    A2[Ctrl+V<br/>Paste] --> P{Clipboard<br/>type?}
     B --> C[Screenshot<br/>PIL ImageGrab]
-    C --> D[EasyOCR<br/>per-word bboxes]
+    P -- image --> C
+    P -- text --> F
+    C --> PRE[Upscale 2× +<br/>Auto-contrast]
+    PRE --> D[EasyOCR<br/>per-word bboxes]
     D --> E1[Pixel-Gap<br/>Word Splitter]
     D --> E2[BBox<br/>Tightener]
     E1 & E2 --> F[Sanitized<br/>Token Stream]
@@ -111,6 +134,7 @@ flowchart LR
     style D fill:#4CAF50,color:#fff
     style I fill:#FFC107,color:#000
     style L fill:#2196F3,color:#fff
+    style PRE fill:#9C27B0,color:#fff
 ```
 
 The core insight is that **OCR words and TTS words don't always align 1:1** — Kokoro occasionally defers tokens (especially around special characters like ®, ©, ™) to a later segment. The aligner solves this by matching on normalized text content rather than on position, with a sequential cursor as a graceful fallback.
@@ -118,6 +142,9 @@ The core insight is that **OCR words and TTS words don't always align 1:1** — 
 ---
 
 ## Under the Hood
+
+**Smart OCR upscaling**
+Most OCR failures aren't model failures — they're starvation. EasyOCR struggles with text under ~14 px tall. Before each detection pass, the screenshot is resized 2× with Lanczos resampling and run through `ImageOps.autocontrast` (skipping if already ≥1600 px on a side). The OCR runs on the upscaled image; bboxes are then divided by 2 to remap onto the original screenshot for highlighting. This recovers most "no text detected" failures on tight UI text without changing the OCR engine.
 
 **Per-pixel bounding box tightening**
 EasyOCR bboxes often include surrounding whitespace. Before highlighting, each bbox is shrunk to the columns that actually contain ink by analyzing per-column pixel brightness variance — so highlights cover only the word, never the space around it.
@@ -137,6 +164,12 @@ The timeline scrubber suppresses tkinter's built-in Scale widget behavior entire
 **Pixel-gap word splitting**
 When EasyOCR returns multiple words in a single detection chunk, the image strip is analyzed for inter-word whitespace gaps by finding columns whose brightness variance falls below 15% of the maximum. The detected gap centers are matched to ideal split positions, giving accurate per-word bboxes without relying on character-count estimation.
 
+**Native launcher with AppUserModelID**
+A minimal C# launcher (`_launcher.cs`) is compiled to `SelectAndRead.exe` during setup using the .NET Framework `csc.exe` that ships with every Windows install — no PyInstaller, no extra build dependencies. The launcher embeds `icon.ico`, calls `SetCurrentProcessExplicitAppUserModelID("SelectAndRead.App")` before spawning Python, and shows the splash. `main.py` sets the same AUMID via ctypes when it starts, and `create_shortcut.ps1` stamps the same AUMID onto the `.lnk` file via `IShellLink + IPropertyStore`. With all three matching, Windows treats the pinned shortcut and the running app as the same identity — one taskbar button, no duplicates.
+
+**File-based splash handshake**
+The splash polls for `%TEMP%\SelectAndRead.ready`, which `main.py` writes via `root.after(50, ...)` once the Tk window has actually painted. Cross-process Win32 window-text APIs are flaky for tkinter windows; a tiny file is bulletproof.
+
 ---
 
 ## Tech Stack
@@ -151,6 +184,7 @@ When EasyOCR returns multiple words in a single detection chunk, the image strip
 | **Hotkeys** | [keyboard](https://github.com/boppreh/keyboard) | System-wide hotkey hooks and live capture for the settings dialog |
 | **Numerics** | [NumPy](https://numpy.org) | Audio array ops, per-column pixel analysis, color math |
 | **GUI** | [tkinter](https://docs.python.org/3/library/tkinter.html) | Main panel, reader window, settings dialogs (stdlib only — no PyQt) |
+| **Launcher** | C# / .NET Framework 4 | `SelectAndRead.exe` — embedded icon, splash, sets `AppUserModelID`, spawns Python. Built at install time by the `csc.exe` that ships with every Windows. |
 
 ---
 
@@ -158,16 +192,18 @@ When EasyOCR returns multiple words in a single detection chunk, the image strip
 
 ```
 SelectAndRead/
-├── main.py                  # Entire app (single-file)
+├── main.py                  # Entire Python app (single-file)
 ├── requirements.txt         # Python dependencies
-├── setup.bat                # First-time setup (venv, packages, model downloads)
-├── _download_models.py      # Helper: pre-fetches OCR + TTS models + all voices
-├── run.bat                  # Launcher (no console window, via _launch.vbs)
-├── _launch.vbs              # Hidden-window launcher used by run.bat / shortcut
-├── debug.bat                # Launcher with console for stack traces
+├── setup.bat                # First-time setup: venv, packages, model + voice downloads, builds SelectAndRead.exe
+├── _download_models.py      # Helper: pre-fetches OCR + TTS models + all 24 voices
+├── _launcher.cs             # Source for SelectAndRead.exe — splash + AUMID + Python spawn
+├── SelectAndRead.exe        # Built by setup.bat (gitignored) — preferred launcher
+├── run.bat                  # Launches SelectAndRead.exe if present, else _launch.vbs fallback
+├── _launch.vbs              # Hidden-window VBS fallback launcher
+├── debug.bat                # Launcher with console attached for stack traces
 ├── create_shortcut.bat      # One-click Desktop shortcut creator
-├── create_shortcut.ps1      # PowerShell shortcut builder (called by .bat)
-├── icon.ico                 # App icon (used by shortcut + tkinter window)
+├── create_shortcut.ps1      # PowerShell shortcut builder (stamps AUMID via COM)
+├── icon.ico                 # App icon (embedded in .exe, on .lnk, and on the tkinter window)
 └── README.md
 ```
 
@@ -181,11 +217,12 @@ User settings live at `~/.tts_reader.json`.
 |---|---|---|
 | Select & Read | `Shift+Z` | Global (anywhere on desktop) |
 | Pause / Resume | `Shift+X` | Global |
+| Paste & Read | `Ctrl+V` | Main panel (focus on app) |
 | Skip forward 5s | `→` | Reader window |
 | Skip backward 5s | `←` | Reader window |
 | Pause / Resume | `Space` | Reader window |
 
-All global hotkeys are remappable from the **⚙ Settings** dialog with live key-combination capture.
+The two **global** hotkeys are remappable from the **⚙ Settings** dialog with live key-combination capture.
 
 ---
 
