@@ -25,7 +25,7 @@ try:
 except Exception:
     pass
 from kokoro import KPipeline
-from PIL import Image, ImageDraw, ImageFont, ImageTk, ImageGrab
+from PIL import Image, ImageDraw, ImageFont, ImageOps, ImageTk, ImageGrab
 import keyboard
 
 try:
@@ -355,6 +355,23 @@ def _pixel_gap_split(img_array, cx1, cy1, cx2, cy2, n) -> list[float] | None:
     return sorted(chosen)
 
 
+def _preprocess_for_ocr(img_array: np.ndarray) -> tuple[np.ndarray, float]:
+    """Upscale + autocontrast small images for better OCR accuracy.
+    Returns (processed_array, bbox_scale_back) — bboxes from OCR on the
+    processed array must be multiplied by scale_back to map to original coords.
+    """
+    h, w = img_array.shape[:2]
+    pil = Image.fromarray(img_array)
+    if pil.mode == "RGBA":
+        pil = pil.convert("RGB")
+    if max(h, w) >= 1600:
+        pil = ImageOps.autocontrast(pil, cutoff=1)
+        return np.array(pil), 1.0
+    pil = pil.resize((w * 2, h * 2), Image.LANCZOS)
+    pil = ImageOps.autocontrast(pil, cutoff=1)
+    return np.array(pil), 0.5
+
+
 def _extract_word_bboxes(ocr_results, img_array=None) -> list[tuple[str, tuple]]:
     """Return [(word, (x1,y1,x2,y2)), ...] in image pixel coords."""
     words = []
@@ -547,6 +564,8 @@ class App:
         # Save whenever the text-view toggle changes
         self._text_view_var.trace_add(
             "write", lambda *_: self._save_settings())
+        self.root.bind_all("<Control-v>", self._do_paste)
+        self.root.bind_all("<Control-V>", self._do_paste)
         self._register_hotkey()
         threading.Thread(
             target=_load_models,
@@ -572,6 +591,9 @@ class App:
             text=f"Select & Read   ({self._hotkey_trigger.upper()})",
             command=self._trigger, width=28)
         self._trigger_btn.pack(**pad)
+
+        ttk.Button(self.root, text="📋  Paste & Read   (Ctrl+V)",
+                   command=self._do_paste, width=28).pack(**pad)
 
         ttk.Button(self.root, text="■  Stop",
                    command=self._stop, width=28).pack(**pad)
@@ -852,6 +874,35 @@ class App:
         region = select_region(self.root)
         if not region:
             return
+        self._begin_pipeline(region=region)
+
+    def _do_paste(self, event=None):
+        # If focus is in an Entry/Text field (e.g. settings dialog), let the
+        # widget handle the paste normally instead of triggering OCR.
+        focused = self.root.focus_get()
+        if isinstance(focused, (tk.Entry, tk.Text, ttk.Entry)):
+            return
+        if _ocr_reader is None or _tts_pipeline is None:
+            return
+        if self._play_state != "idle":
+            return
+        try:
+            clip = ImageGrab.grabclipboard()
+        except Exception:
+            clip = None
+        if isinstance(clip, Image.Image):
+            self._begin_pipeline(image=clip)
+            return
+        try:
+            text = self.root.clipboard_get().strip()
+        except Exception:
+            text = ""
+        if text:
+            self._begin_pipeline(text=text)
+            return
+        self.status_var.set("Clipboard is empty (copy text or an image first)")
+
+    def _begin_pipeline(self, *, region=None, image=None, text=None):
         self.stop_event.clear()
         self._play_event.clear()
         self._full_audio = None
@@ -860,8 +911,10 @@ class App:
         self._pause_pos = 0.0
         self._play_state = "generating"
         self.status_var.set("Scanning…")
-        threading.Thread(target=self._generate, args=(region,),
-                         daemon=True).start()
+        threading.Thread(
+            target=self._generate,
+            kwargs={"region": region, "image": image, "text": text},
+            daemon=True).start()
 
     def _stop(self):
         self.stop_event.set()
@@ -875,38 +928,58 @@ class App:
 
     # ── Generation ────────────────────────────────────────────────────────────
 
-    def _generate(self, region):
+    def _generate(self, *, region=None, image=None, text=None):
         try:
-            img = ImageGrab.grab(bbox=region, all_screens=True)
-            img_array = np.array(img)
-            # width_ths=0.01 tells EasyOCR not to merge nearby words,
-            # so we get per-word bboxes directly from the detector.
-            ocr_results = _ocr_reader.readtext(img_array, width_ths=0.01)
-            word_data = _extract_word_bboxes(ocr_results, img_array)
-
-            if not word_data:
-                self.root.after(0, lambda: self.status_var.set("No text detected"))
-                return
-
-            # TTS text: all tokens (punctuation attached to preceding words by
-            # _tts_safe so Kokoro gets "Hello, world." not "Hello , world .").
-            all_ocr_words = [w for w, _ in word_data]
-            text = _tts_safe(all_ocr_words)
-
-            # Alignment/highlighting: only tokens with alphanumeric content.
-            # Pure-punctuation tokens have no bbox worth highlighting.
-            word_data  = [(w, b) for w, b in word_data
-                          if any(c.isalnum() for c in w)]
-
-            ocr_words  = [w for w, _ in word_data]
-            img_bboxes = [b for _, b in word_data]
-
-            # Show the canvas immediately after OCR so the user can see the image
-            if self._text_view_var.get():
+            if text is not None:
+                tokens = [t for t in text.split() if t]
+                if not tokens:
+                    self.root.after(0, lambda: self.status_var.set("No text to read"))
+                    return
+                tts_text = _tts_safe(tokens)
+                ocr_words = [w for w in tokens if any(c.isalnum() for c in w)]
+                if not ocr_words:
+                    self.root.after(0, lambda: self.status_var.set("No readable text"))
+                    return
                 pil_img, disp_bboxes = _make_text_image(ocr_words)
             else:
-                pil_img      = Image.fromarray(img_array)
-                disp_bboxes  = img_bboxes
+                if image is None:
+                    image = ImageGrab.grab(bbox=region, all_screens=True)
+                img_array = np.array(image)
+                # Upscale + auto-contrast small images so EasyOCR sees enough
+                # pixels per character — recovers most "no text detected"
+                # failures on tight UI text without changing the OCR model.
+                img_for_ocr, bbox_scale = _preprocess_for_ocr(img_array)
+                # width_ths=0.01 tells EasyOCR not to merge nearby words,
+                # so we get per-word bboxes directly from the detector.
+                ocr_results = _ocr_reader.readtext(img_for_ocr, width_ths=0.01)
+                word_data = _extract_word_bboxes(ocr_results, img_for_ocr)
+                if bbox_scale != 1.0:
+                    word_data = [(w, tuple(int(c * bbox_scale) for c in b))
+                                 for w, b in word_data]
+
+                if not word_data:
+                    self.root.after(0, lambda: self.status_var.set("No text detected"))
+                    return
+
+                # TTS text: all tokens (punctuation attached to preceding words by
+                # _tts_safe so Kokoro gets "Hello, world." not "Hello , world .").
+                all_ocr_words = [w for w, _ in word_data]
+                tts_text = _tts_safe(all_ocr_words)
+
+                # Alignment/highlighting: only tokens with alphanumeric content.
+                # Pure-punctuation tokens have no bbox worth highlighting.
+                word_data  = [(w, b) for w, b in word_data
+                              if any(c.isalnum() for c in w)]
+
+                ocr_words  = [w for w, _ in word_data]
+                img_bboxes = [b for _, b in word_data]
+
+                # Show the canvas immediately after OCR so the user can see the image
+                if self._text_view_var.get():
+                    pil_img, disp_bboxes = _make_text_image(ocr_words)
+                else:
+                    pil_img      = Image.fromarray(img_array)
+                    disp_bboxes  = img_bboxes
             if self._highlight_mode.get() == "auto":
                 arr = np.array(pil_img)
                 bg_hex, text_hex = _detect_image_colors(arr, disp_bboxes)
@@ -932,7 +1005,7 @@ class App:
             schedule: list[tuple[int, float]] = []
             running = 0.0
 
-            for result in _tts_pipeline(text, voice=self._voice_id):
+            for result in _tts_pipeline(tts_text, voice=self._voice_id):
                 if self.stop_event.is_set():
                     return
 
