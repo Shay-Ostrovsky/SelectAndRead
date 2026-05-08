@@ -1282,19 +1282,26 @@ class App:
         # Give the canvas default focus so shortcuts work immediately on open
         cv.focus_set()
 
-        # Position so the canvas content (not the outer frame) aligns with the
-        # top-left corner of the captured region.  We set an initial geometry,
-        # let Tkinter compute the frame decorations, measure the offsets, then
-        # correct so content_origin == region origin.
+        total_h = disp_h + 115
         if region:
+            # Drag-region flow: align canvas content (not the outer frame) with
+            # the top-left corner of the captured region. We set an initial
+            # geometry, let Tkinter compute the frame decorations, measure the
+            # offsets, then correct so content_origin == region origin.
             wx, wy = region[0], region[1]
+            win.geometry(f"{disp_w}x{total_h}+{wx}+{wy}")
+            win.update_idletasks()
+            off_x = win.winfo_rootx() - win.winfo_x()
+            off_y = win.winfo_rooty() - win.winfo_y()
+            win.geometry(f"{disp_w}x{total_h}+{wx - off_x}+{wy - off_y}")
         else:
-            wx, wy = 0, 0
-        win.geometry(f"{disp_w}x{disp_h + 115}+{wx}+{wy}")
-        win.update_idletasks()
-        off_x = win.winfo_rootx() - win.winfo_x()
-        off_y = win.winfo_rooty() - win.winfo_y()
-        win.geometry(f"{disp_w}x{disp_h + 115}+{wx - off_x}+{wy - off_y}")
+            # Paste / no-region flow: center the window on the primary screen.
+            win.update_idletasks()
+            sw = win.winfo_screenwidth()
+            sh = win.winfo_screenheight()
+            cx = max(0, (sw - disp_w) // 2)
+            cy = max(0, (sh - total_h) // 2)
+            win.geometry(f"{disp_w}x{total_h}+{cx}+{cy}")
         win.protocol("WM_DELETE_WINDOW", self._stop)
 
         self._reader_win        = win
