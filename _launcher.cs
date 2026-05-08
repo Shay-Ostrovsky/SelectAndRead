@@ -1,8 +1,10 @@
 using System;
 using System.Diagnostics;
 using System.Drawing;
+using System.Drawing.Drawing2D;
 using System.IO;
 using System.Runtime.InteropServices;
+using System.Text;
 using System.Windows.Forms;
 
 [assembly: System.Reflection.AssemblyTitle("SelectAndRead")]
@@ -59,11 +61,21 @@ class Program {
 }
 
 class SplashForm : Form {
-    private readonly Process pyProc;
-    private readonly Timer pollTimer;
+    [DllImport("user32.dll")]
+    static extern bool EnumWindows(EnumWindowsProc enumProc, IntPtr lParam);
+    [DllImport("user32.dll")]
+    static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint processId);
+    [DllImport("user32.dll")]
+    static extern bool IsWindowVisible(IntPtr hWnd);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    static extern int GetWindowTextLength(IntPtr hWnd);
+    delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
+
+    private float angle = 0;
     private readonly Timer animTimer;
-    private readonly Label loadingLabel;
-    private int dots = 0;
+    private readonly Timer pollTimer;
+    private readonly Process pyProc;
+    private Image iconImage;
     private int polls = 0;
 
     public SplashForm(string iconPath, Process pyProc) {
@@ -71,71 +83,96 @@ class SplashForm : Form {
 
         FormBorderStyle = FormBorderStyle.None;
         StartPosition   = FormStartPosition.CenterScreen;
-        Size            = new Size(320, 140);
-        BackColor       = Color.FromArgb(28, 28, 32);
-        ForeColor       = Color.White;
+        Size            = new Size(170, 170);
+        BackColor       = Color.FromArgb(20, 20, 26);
         TopMost         = true;
         ShowInTaskbar   = false;
+        DoubleBuffered  = true;
         Text            = "SelectAndRead Loading";
 
-        Paint += (s, e) => {
-            using (var pen = new Pen(Color.FromArgb(80, 80, 95), 1))
-                e.Graphics.DrawRectangle(pen, 0, 0, Width - 1, Height - 1);
-        };
-
-        if (File.Exists(iconPath)) {
-            try {
-                Icon ico = new Icon(iconPath, 64, 64);
-                this.Icon = ico;
-                Controls.Add(new PictureBox {
-                    Image     = ico.ToBitmap(),
-                    SizeMode  = PictureBoxSizeMode.CenterImage,
-                    Location  = new Point(24, 36),
-                    Size      = new Size(72, 72),
-                    BackColor = Color.Transparent,
-                });
-            } catch {}
+        // Rounded corners
+        using (var path = new GraphicsPath()) {
+            int r = 22;
+            path.AddArc(0,         0,         r, r, 180, 90);
+            path.AddArc(Width-r-1, 0,         r, r, 270, 90);
+            path.AddArc(Width-r-1, Height-r-1,r, r,   0, 90);
+            path.AddArc(0,         Height-r-1,r, r,  90, 90);
+            path.CloseFigure();
+            Region = new Region(path);
         }
 
-        Controls.Add(new Label {
-            Text      = "SelectAndRead",
-            ForeColor = Color.White,
-            Font      = new Font("Segoe UI", 14, FontStyle.Bold),
-            AutoSize  = false,
-            Location  = new Point(110, 38),
-            Size      = new Size(195, 28),
-            BackColor = Color.Transparent,
-        });
+        if (File.Exists(iconPath)) {
+            try { iconImage = new Icon(iconPath, 64, 64).ToBitmap(); } catch {}
+        }
 
-        loadingLabel = new Label {
-            Text      = "Loading...",
-            ForeColor = Color.FromArgb(170, 170, 180),
-            Font      = new Font("Segoe UI", 10),
-            AutoSize  = false,
-            Location  = new Point(110, 70),
-            Size      = new Size(195, 22),
-            BackColor = Color.Transparent,
-        };
-        Controls.Add(loadingLabel);
+        Paint += OnPaint;
 
-        animTimer = new Timer { Interval = 350 };
+        animTimer = new Timer { Interval = 16 };  // ~60 fps
         animTimer.Tick += (s, e) => {
-            dots = (dots + 1) % 4;
-            loadingLabel.Text = "Loading" + new string('.', dots);
+            angle = (angle + 4f) % 360f;
+            Invalidate();
         };
         animTimer.Start();
 
-        pollTimer = new Timer { Interval = 250 };
+        pollTimer = new Timer { Interval = 200 };
         pollTimer.Tick += (s, e) => {
             polls++;
             try {
                 if (pyProc.HasExited) { Close(); return; }
-                pyProc.Refresh();
-                if (pyProc.MainWindowHandle != IntPtr.Zero) { Close(); return; }
+                if (HasVisibleWindow((uint)pyProc.Id)) { Close(); return; }
             } catch { Close(); return; }
-            if (polls > 480) Close();   // 2 min timeout
+            if (polls > 900) Close();   // ~3 min timeout
         };
         pollTimer.Start();
+    }
+
+    void OnPaint(object sender, PaintEventArgs e) {
+        Graphics g = e.Graphics;
+        g.SmoothingMode = SmoothingMode.AntiAlias;
+        g.InterpolationMode = InterpolationMode.HighQualityBicubic;
+
+        int cx = Width / 2, cy = Height / 2;
+        int outerR = Math.Min(Width, Height) / 2 - 12;
+        var ringRect = new Rectangle(cx - outerR, cy - outerR, outerR * 2, outerR * 2);
+
+        // Faint background ring
+        using (var bgPen = new Pen(Color.FromArgb(30, 255, 180, 60), 5f)) {
+            g.DrawArc(bgPen, ringRect, 0, 360);
+        }
+
+        // Spinning gold-orange arc (~110 degrees)
+        using (var pen = new Pen(Color.FromArgb(255, 255, 175, 50), 5f)) {
+            pen.StartCap = LineCap.Round;
+            pen.EndCap   = LineCap.Round;
+            g.DrawArc(pen, ringRect, angle, 110);
+        }
+
+        // Brighter "head" of the arc
+        using (var pen = new Pen(Color.FromArgb(255, 255, 215, 0), 5f)) {
+            pen.StartCap = LineCap.Round;
+            pen.EndCap   = LineCap.Round;
+            g.DrawArc(pen, ringRect, angle + 80, 30);
+        }
+
+        // App icon in the center
+        if (iconImage != null) {
+            int s = 56;
+            g.DrawImage(iconImage, cx - s/2, cy - s/2, s, s);
+        }
+    }
+
+    static bool HasVisibleWindow(uint pid) {
+        bool found = false;
+        EnumWindows((hWnd, lParam) => {
+            uint procId;
+            GetWindowThreadProcessId(hWnd, out procId);
+            if (procId == pid && IsWindowVisible(hWnd) && GetWindowTextLength(hWnd) > 0) {
+                found = true;
+                return false;
+            }
+            return true;
+        }, IntPtr.Zero);
+        return found;
     }
 
     protected override void OnFormClosing(FormClosingEventArgs e) {
