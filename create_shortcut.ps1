@@ -2,25 +2,33 @@
 # Run via create_shortcut.bat (double-click)
 
 $appDir  = $PSScriptRoot
+$exeFile = Join-Path $appDir "SelectAndRead.exe"
 $vbsFile = Join-Path $appDir "_launch.vbs"
 $desktop = [Environment]::GetFolderPath("Desktop")
 $lnkPath = Join-Path $desktop "SelectAndRead.lnk"
-$wscript = "$env:SystemRoot\System32\wscript.exe"
-
-if (-not (Test-Path $vbsFile)) {
-    Write-Host "ERROR: _launch.vbs not found in $appDir" -ForegroundColor Red
-    pause; exit 1
-}
 
 $shell                     = New-Object -ComObject WScript.Shell
 $shortcut                  = $shell.CreateShortcut($lnkPath)
-$shortcut.TargetPath       = $wscript
-$shortcut.Arguments        = "//B //Nologo `"$vbsFile`""
+
+if (Test-Path $exeFile) {
+    # Preferred: target the real .exe so taskbar pinning works correctly
+    $shortcut.TargetPath = $exeFile
+    $shortcut.Arguments  = ""
+} elseif (Test-Path $vbsFile) {
+    # Fallback: VBS launcher (taskbar pin will be less clean)
+    $wscript = "$env:SystemRoot\System32\wscript.exe"
+    $shortcut.TargetPath = $wscript
+    $shortcut.Arguments  = "//B //Nologo `"$vbsFile`""
+} else {
+    Write-Host "ERROR: Neither SelectAndRead.exe nor _launch.vbs found in $appDir" -ForegroundColor Red
+    Write-Host "Run setup.bat first." -ForegroundColor Yellow
+    pause; exit 1
+}
+
 $shortcut.WorkingDirectory = $appDir
 $shortcut.Description      = "SelectAndRead"
 $iconIco = Join-Path $appDir "icon.ico"
 if (Test-Path $iconIco) { $shortcut.IconLocation = $iconIco }
-else                    { $shortcut.IconLocation = "$wscript,0" }
 $shortcut.Save()
 
 # Stamp AppUserModelID on the shortcut so the pinned button and

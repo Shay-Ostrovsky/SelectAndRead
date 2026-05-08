@@ -4,6 +4,7 @@ __pycache__/
 *.pyo
 *.pyd
 python_path.txt
+SelectAndRead.exe
 *.egg-info/
 dist/
 build/

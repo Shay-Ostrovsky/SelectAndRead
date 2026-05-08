@@ -125,6 +125,27 @@ if errorlevel 1 (
 )
 
 echo.
+echo Building SelectAndRead.exe launcher...
+set CSC=
+if exist "%SystemRoot%\Microsoft.NET\Framework64\v4.0.30319\csc.exe" set CSC=%SystemRoot%\Microsoft.NET\Framework64\v4.0.30319\csc.exe
+if "%CSC%"=="" if exist "%SystemRoot%\Microsoft.NET\Framework\v4.0.30319\csc.exe" set CSC=%SystemRoot%\Microsoft.NET\Framework\v4.0.30319\csc.exe
+
+if not "%CSC%"=="" (
+    if exist "icon.ico" (
+        "%CSC%" /nologo /out:SelectAndRead.exe /target:winexe /win32icon:icon.ico /reference:System.Windows.Forms.dll _launcher.cs >nul
+    ) else (
+        "%CSC%" /nologo /out:SelectAndRead.exe /target:winexe /reference:System.Windows.Forms.dll _launcher.cs >nul
+    )
+    if exist "SelectAndRead.exe" (
+        echo Launcher built.
+    ) else (
+        echo WARNING: Launcher build failed -- run.bat will use the VBS fallback.
+    )
+) else (
+    echo WARNING: .NET compiler not found -- run.bat will use the VBS fallback.
+)
+
+echo.
 echo ====================================
 echo  Setup complete!
 echo.
