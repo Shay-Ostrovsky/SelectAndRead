@@ -77,7 +77,7 @@ The reader gives you a full timeline scrubber, ±5s skip, 0.5×–2.0× speed, p
 - **Tight word highlights** — covers only the letters, never the surrounding whitespace
 
 ### Voices and audio
-- **25 English voices** — American/British, male/female (Kokoro voice pack)
+- **24 English voices** — American/British, male/female (Kokoro voice pack)
 - **WAV export** — 16-bit, 24 kHz, ready for podcast feeds or Audacity
 - **GPU acceleration** for both OCR and TTS (toggle from the UI, requires CUDA)
 
@@ -158,13 +158,16 @@ When EasyOCR returns multiple words in a single detection chunk, the image strip
 
 ```
 SelectAndRead/
-├── main.py                  # Entire app (~1400 lines, single-file)
+├── main.py                  # Entire app (single-file)
 ├── requirements.txt         # Python dependencies
 ├── setup.bat                # First-time setup (venv, packages, model downloads)
-├── run.bat                  # Launcher (no console window)
+├── _download_models.py      # Helper: pre-fetches OCR + TTS models + all voices
+├── run.bat                  # Launcher (no console window, via _launch.vbs)
+├── _launch.vbs              # Hidden-window launcher used by run.bat / shortcut
 ├── debug.bat                # Launcher with console for stack traces
-├── link_env.bat             # Hook an existing Python env into run.bat
-├── create_shortcut.ps1      # Add a Desktop shortcut
+├── create_shortcut.bat      # One-click Desktop shortcut creator
+├── create_shortcut.ps1      # PowerShell shortcut builder (called by .bat)
+├── icon.ico                 # App icon (used by shortcut + tkinter window)
 └── README.md
 ```
 

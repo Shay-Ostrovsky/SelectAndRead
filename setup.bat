@@ -31,7 +31,18 @@ if errorlevel 1 (
 echo Python version OK.
 echo.
 
-if not exist "venv" (
+set NEED_VENV=0
+if not exist "venv\Scripts\python.exe" set NEED_VENV=1
+if exist "venv\Scripts\python.exe" (
+    venv\Scripts\python.exe --version >nul 2>&1
+    if errorlevel 1 set NEED_VENV=1
+)
+
+if "%NEED_VENV%"=="1" (
+    if exist "venv" (
+        echo Existing venv is broken or points to a missing Python -- recreating...
+        rmdir /s /q venv
+    )
     echo Creating virtual environment...
     python -m venv venv
     if errorlevel 1 (
@@ -40,7 +51,7 @@ if not exist "venv" (
         exit /b 1
     )
 ) else (
-    echo Virtual environment already exists, skipping creation.
+    echo Virtual environment already exists and is valid.
 )
 
 echo.
@@ -126,7 +137,7 @@ if /i "%GPU_CHOICE%"=="Y" (
 echo.
 echo  To launch the app:
 echo    - Double-click run.bat, OR
-echo    - Run create_shortcut.ps1 once
+echo    - Double-click create_shortcut.bat
 echo      to add a Desktop shortcut.
 echo ====================================
 pause

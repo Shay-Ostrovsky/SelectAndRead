@@ -10,7 +10,7 @@ if exist "python_path.txt" (
 
 if not exist "%PYTHON%" (
     echo Python executable not found: %PYTHON%
-    echo Run setup.bat to create a venv, or link_env.bat to use an existing environment.
+    echo Run setup.bat first.
     pause
     exit /b 1
 )
