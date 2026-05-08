@@ -38,6 +38,9 @@ class Program {
 
         string mainPy   = Path.Combine(appDir, "main.py");
         string iconPath = Path.Combine(appDir, "icon.ico");
+        string readyFile = Path.Combine(Path.GetTempPath(), "SelectAndRead.ready");
+        // Wipe any stale signal from a previous run before launching python
+        try { if (File.Exists(readyFile)) File.Delete(readyFile); } catch {}
 
         Process pyProc;
         try {
@@ -57,7 +60,7 @@ class Program {
 
         Application.EnableVisualStyles();
         Application.SetCompatibleTextRenderingDefault(false);
-        Application.Run(new SplashForm(iconPath, pyProc));
+        Application.Run(new SplashForm(iconPath, pyProc, readyFile));
     }
 }
 
@@ -96,11 +99,13 @@ class SplashForm : Form {
     private readonly Timer animTimer;
     private readonly Timer pollTimer;
     private readonly Process pyProc;
+    private readonly string readyFile;
     private Image iconImage;
     private int polls = 0;
 
-    public SplashForm(string iconPath, Process pyProc) {
-        this.pyProc = pyProc;
+    public SplashForm(string iconPath, Process pyProc, string readyFile) {
+        this.pyProc    = pyProc;
+        this.readyFile = readyFile;
 
         FormBorderStyle = FormBorderStyle.None;
         StartPosition   = FormStartPosition.CenterScreen;
@@ -124,6 +129,7 @@ class SplashForm : Form {
             polls++;
             try {
                 if (pyProc.HasExited) { Close(); return; }
+                if (File.Exists(readyFile))     { Close(); return; }
                 if (HasSelectAndReadWindow((uint)pyProc.Id)) { Close(); return; }
             } catch { Close(); return; }
             if (polls > 1500) Close();   // ~5 min safety timeout
@@ -233,6 +239,7 @@ class SplashForm : Form {
         animTimer.Stop();
         pollTimer.Stop();
         if (iconImage != null) { iconImage.Dispose(); iconImage = null; }
+        try { if (File.Exists(readyFile)) File.Delete(readyFile); } catch {}
         base.OnFormClosing(e);
     }
 }

@@ -496,6 +496,18 @@ class App:
         if os.path.exists(_ico):
             self.root.iconbitmap(_ico)
 
+        # Signal the launcher splash that the app window is up
+        def _signal_ready():
+            try:
+                self.root.update_idletasks()
+                self.root.update()
+                with open(os.path.join(os.environ.get("TEMP", os.path.expanduser("~")),
+                                      "SelectAndRead.ready"), "w") as _f:
+                    _f.write(str(os.getpid()))
+            except Exception:
+                pass
+        self.root.after(50, _signal_ready)
+
         self.stop_event  = threading.Event()
         self._play_event = threading.Event()   # set=playing  clear=paused/stopped
 
