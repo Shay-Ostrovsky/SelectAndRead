@@ -2,6 +2,7 @@ using System;
 using System.Diagnostics;
 using System.Drawing;
 using System.Drawing.Drawing2D;
+using System.Drawing.Imaging;
 using System.IO;
 using System.Runtime.InteropServices;
 using System.Text;
@@ -61,15 +62,35 @@ class Program {
 }
 
 class SplashForm : Form {
-    [DllImport("user32.dll")]
-    static extern bool EnumWindows(EnumWindowsProc enumProc, IntPtr lParam);
-    [DllImport("user32.dll")]
-    static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint processId);
-    [DllImport("user32.dll")]
-    static extern bool IsWindowVisible(IntPtr hWnd);
+    [DllImport("user32.dll")] static extern bool EnumWindows(EnumWindowsProc p, IntPtr l);
+    [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
+    [DllImport("user32.dll")] static extern bool IsWindowVisible(IntPtr h);
     [DllImport("user32.dll", CharSet = CharSet.Unicode)]
-    static extern int GetWindowTextLength(IntPtr hWnd);
-    delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
+    static extern int GetWindowText(IntPtr h, StringBuilder s, int n);
+    [DllImport("user32.dll")] static extern int GetWindowTextLength(IntPtr h);
+    delegate bool EnumWindowsProc(IntPtr h, IntPtr l);
+
+    [DllImport("user32.dll")] static extern IntPtr GetDC(IntPtr h);
+    [DllImport("user32.dll")] static extern int ReleaseDC(IntPtr h, IntPtr dc);
+    [DllImport("user32.dll")] static extern bool UpdateLayeredWindow(
+        IntPtr hwnd, IntPtr hdcDst, ref POINT pptDst, ref SIZE psize,
+        IntPtr hdcSrc, ref POINT pprSrc, int crKey, ref BLENDFUNCTION pblend, int dwFlags);
+    [DllImport("gdi32.dll")] static extern IntPtr CreateCompatibleDC(IntPtr h);
+    [DllImport("gdi32.dll")] static extern bool DeleteDC(IntPtr dc);
+    [DllImport("gdi32.dll")] static extern IntPtr SelectObject(IntPtr dc, IntPtr o);
+    [DllImport("gdi32.dll")] static extern bool DeleteObject(IntPtr o);
+
+    [StructLayout(LayoutKind.Sequential)] struct POINT { public int X, Y; }
+    [StructLayout(LayoutKind.Sequential)] struct SIZE { public int cx, cy; }
+    [StructLayout(LayoutKind.Sequential, Pack = 1)]
+    struct BLENDFUNCTION { public byte Op, Flags, Alpha, Format; }
+
+    const int GWL_EXSTYLE       = -20;
+    const int WS_EX_LAYERED     = 0x00080000;
+    const int WS_EX_TOOLWINDOW  = 0x00000080;
+    const int ULW_ALPHA         = 0x02;
+    const byte AC_SRC_OVER      = 0x00;
+    const byte AC_SRC_ALPHA     = 0x01;
 
     private float angle = 0;
     private readonly Timer animTimer;
@@ -84,91 +105,124 @@ class SplashForm : Form {
         FormBorderStyle = FormBorderStyle.None;
         StartPosition   = FormStartPosition.CenterScreen;
         Size            = new Size(170, 170);
-        BackColor       = Color.FromArgb(20, 20, 26);
         TopMost         = true;
         ShowInTaskbar   = false;
-        DoubleBuffered  = true;
         Text            = "SelectAndRead Loading";
-
-        // Rounded corners
-        using (var path = new GraphicsPath()) {
-            int r = 22;
-            path.AddArc(0,         0,         r, r, 180, 90);
-            path.AddArc(Width-r-1, 0,         r, r, 270, 90);
-            path.AddArc(Width-r-1, Height-r-1,r, r,   0, 90);
-            path.AddArc(0,         Height-r-1,r, r,  90, 90);
-            path.CloseFigure();
-            Region = new Region(path);
-        }
 
         if (File.Exists(iconPath)) {
             try { iconImage = new Icon(iconPath, 64, 64).ToBitmap(); } catch {}
         }
 
-        Paint += OnPaint;
-
-        animTimer = new Timer { Interval = 16 };  // ~60 fps
+        animTimer = new Timer { Interval = 16 };
         animTimer.Tick += (s, e) => {
             angle = (angle + 4f) % 360f;
-            Invalidate();
+            Render();
         };
-        animTimer.Start();
 
         pollTimer = new Timer { Interval = 200 };
         pollTimer.Tick += (s, e) => {
             polls++;
             try {
                 if (pyProc.HasExited) { Close(); return; }
-                if (HasVisibleWindow((uint)pyProc.Id)) { Close(); return; }
+                if (HasSelectAndReadWindow((uint)pyProc.Id)) { Close(); return; }
             } catch { Close(); return; }
-            if (polls > 900) Close();   // ~3 min timeout
+            if (polls > 1500) Close();   // ~5 min safety timeout
         };
+    }
+
+    protected override CreateParams CreateParams {
+        get {
+            var cp = base.CreateParams;
+            cp.ExStyle |= WS_EX_LAYERED | WS_EX_TOOLWINDOW;
+            return cp;
+        }
+    }
+
+    protected override void OnShown(EventArgs e) {
+        base.OnShown(e);
+        Render();
+        animTimer.Start();
         pollTimer.Start();
     }
 
-    void OnPaint(object sender, PaintEventArgs e) {
-        Graphics g = e.Graphics;
-        g.SmoothingMode = SmoothingMode.AntiAlias;
-        g.InterpolationMode = InterpolationMode.HighQualityBicubic;
+    void Render() {
+        using (var bmp = new Bitmap(Width, Height, PixelFormat.Format32bppArgb))
+        using (var g = Graphics.FromImage(bmp)) {
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+            g.InterpolationMode = InterpolationMode.HighQualityBicubic;
 
-        int cx = Width / 2, cy = Height / 2;
-        int outerR = Math.Min(Width, Height) / 2 - 12;
-        var ringRect = new Rectangle(cx - outerR, cy - outerR, outerR * 2, outerR * 2);
+            int cx = Width / 2, cy = Height / 2;
+            int outerR = Math.Min(Width, Height) / 2 - 12;
+            var ringRect = new Rectangle(cx - outerR, cy - outerR, outerR * 2, outerR * 2);
 
-        // Faint background ring
-        using (var bgPen = new Pen(Color.FromArgb(30, 255, 180, 60), 5f)) {
-            g.DrawArc(bgPen, ringRect, 0, 360);
-        }
+            // Faint background ring
+            using (var bgPen = new Pen(Color.FromArgb(60, 255, 180, 60), 6f)) {
+                g.DrawArc(bgPen, ringRect, 0, 360);
+            }
 
-        // Spinning gold-orange arc (~110 degrees)
-        using (var pen = new Pen(Color.FromArgb(255, 255, 175, 50), 5f)) {
-            pen.StartCap = LineCap.Round;
-            pen.EndCap   = LineCap.Round;
-            g.DrawArc(pen, ringRect, angle, 110);
-        }
+            // Trailing arc
+            using (var pen = new Pen(Color.FromArgb(255, 255, 165, 40), 6f)) {
+                pen.StartCap = LineCap.Round;
+                pen.EndCap   = LineCap.Round;
+                g.DrawArc(pen, ringRect, angle, 110);
+            }
 
-        // Brighter "head" of the arc
-        using (var pen = new Pen(Color.FromArgb(255, 255, 215, 0), 5f)) {
-            pen.StartCap = LineCap.Round;
-            pen.EndCap   = LineCap.Round;
-            g.DrawArc(pen, ringRect, angle + 80, 30);
-        }
+            // Brighter head
+            using (var pen = new Pen(Color.FromArgb(255, 255, 220, 0), 6f)) {
+                pen.StartCap = LineCap.Round;
+                pen.EndCap   = LineCap.Round;
+                g.DrawArc(pen, ringRect, angle + 80, 30);
+            }
 
-        // App icon in the center
-        if (iconImage != null) {
-            int s = 56;
-            g.DrawImage(iconImage, cx - s/2, cy - s/2, s, s);
+            if (iconImage != null) {
+                int s = 56;
+                g.DrawImage(iconImage, cx - s/2, cy - s/2, s, s);
+            }
+
+            PushBitmap(bmp);
         }
     }
 
-    static bool HasVisibleWindow(uint pid) {
+    void PushBitmap(Bitmap bmp) {
+        IntPtr screenDc = GetDC(IntPtr.Zero);
+        IntPtr memDc    = CreateCompatibleDC(screenDc);
+        IntPtr hBmp     = bmp.GetHbitmap(Color.FromArgb(0));
+        IntPtr oldBmp   = SelectObject(memDc, hBmp);
+
+        var size  = new SIZE  { cx = bmp.Width, cy = bmp.Height };
+        var pos   = new POINT { X = Left,       Y = Top         };
+        var src   = new POINT { X = 0,          Y = 0           };
+        var blend = new BLENDFUNCTION {
+            Op     = AC_SRC_OVER, Flags  = 0,
+            Alpha  = 255,         Format = AC_SRC_ALPHA,
+        };
+
+        try {
+            UpdateLayeredWindow(Handle, screenDc, ref pos, ref size,
+                                memDc, ref src, 0, ref blend, ULW_ALPHA);
+        } finally {
+            SelectObject(memDc, oldBmp);
+            DeleteObject(hBmp);
+            DeleteDC(memDc);
+            ReleaseDC(IntPtr.Zero, screenDc);
+        }
+    }
+
+    static bool HasSelectAndReadWindow(uint pid) {
         bool found = false;
         EnumWindows((hWnd, lParam) => {
             uint procId;
             GetWindowThreadProcessId(hWnd, out procId);
-            if (procId == pid && IsWindowVisible(hWnd) && GetWindowTextLength(hWnd) > 0) {
-                found = true;
-                return false;
+            if (procId == pid && IsWindowVisible(hWnd)) {
+                int len = GetWindowTextLength(hWnd);
+                if (len > 0) {
+                    var sb = new StringBuilder(len + 1);
+                    GetWindowText(hWnd, sb, len + 1);
+                    if (sb.ToString() == "SelectAndRead") {
+                        found = true;
+                        return false;
+                    }
+                }
             }
             return true;
         }, IntPtr.Zero);
@@ -178,6 +232,7 @@ class SplashForm : Form {
     protected override void OnFormClosing(FormClosingEventArgs e) {
         animTimer.Stop();
         pollTimer.Stop();
+        if (iconImage != null) { iconImage.Dispose(); iconImage = null; }
         base.OnFormClosing(e);
     }
 }
