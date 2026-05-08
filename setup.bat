@@ -132,9 +132,9 @@ if "%CSC%"=="" if exist "%SystemRoot%\Microsoft.NET\Framework\v4.0.30319\csc.exe
 
 if not "%CSC%"=="" (
     if exist "icon.ico" (
-        "%CSC%" /nologo /out:SelectAndRead.exe /target:winexe /win32icon:icon.ico /reference:System.Windows.Forms.dll _launcher.cs >nul
+        "%CSC%" /nologo /out:SelectAndRead.exe /target:winexe /win32icon:icon.ico /reference:System.Windows.Forms.dll /reference:System.Drawing.dll _launcher.cs >nul
     ) else (
-        "%CSC%" /nologo /out:SelectAndRead.exe /target:winexe /reference:System.Windows.Forms.dll _launcher.cs >nul
+        "%CSC%" /nologo /out:SelectAndRead.exe /target:winexe /reference:System.Windows.Forms.dll /reference:System.Drawing.dll _launcher.cs >nul
     )
     if exist "SelectAndRead.exe" (
         echo Launcher built.
