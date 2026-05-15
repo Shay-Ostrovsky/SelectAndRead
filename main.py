@@ -534,6 +534,7 @@ class App:
         self._pause_pos = 0.0
         self._play_state = "idle"
         self._idle_seeked = False   # user moved the slider/clicked a word after audio ended
+        self._extracted_text: str | None = None
 
         self.status_var        = tk.StringVar(value="Loading models…")
         self._highlight_color  = "#fff200"
@@ -909,6 +910,7 @@ class App:
         self._full_audio = None
         self._word_schedule = []
         self._word_bboxes_canvas = []
+        self._extracted_text = None
         self._pause_pos = 0.0
         self._play_state = "generating"
         self.status_var.set("Scanning…")
@@ -981,6 +983,7 @@ class App:
                 else:
                     pil_img      = Image.fromarray(img_array)
                     disp_bboxes  = img_bboxes
+            self._extracted_text = tts_text
             if self._highlight_mode.get() == "auto":
                 arr = np.array(pil_img)
                 bg_hex, text_hex = _detect_image_colors(arr, disp_bboxes)
@@ -1230,7 +1233,9 @@ class App:
         ttk.Button(ctrl, text="■  Stop", command=self._stop,
                    width=8).pack(side=tk.LEFT, padx=(0, 4))
         ttk.Button(ctrl, text="💾  Export", command=self._export_audio,
-                   width=10).pack(side=tk.LEFT, padx=(0, 8))
+                   width=10).pack(side=tk.LEFT, padx=(0, 4))
+        ttk.Button(ctrl, text="📋  Copy", command=self._copy_text,
+                   width=9).pack(side=tk.LEFT, padx=(0, 8))
 
         sv = tk.StringVar(value="Generating speech…")
         ttk.Label(ctrl, textvariable=sv, foreground="gray").pack(side=tk.LEFT)
@@ -1573,6 +1578,19 @@ class App:
             wf.setsampwidth(2)
             wf.setframerate(24000)
             wf.writeframes(pcm.tobytes())
+
+    def _copy_text(self):
+        """Copy the extracted text to the system clipboard."""
+        if not self._extracted_text:
+            return
+        try:
+            self.root.clipboard_clear()
+            self.root.clipboard_append(self._extracted_text)
+            self.root.update()   # ensure the clipboard persists after window destroy
+        except Exception:
+            return
+        if self._reader_status_var:
+            self._reader_status_var.set("Copied to clipboard")
 
     def _close_reader(self):
         if self._reader_win is not None:
