@@ -1201,6 +1201,8 @@ class App:
         cv = tk.Canvas(win, width=disp_w, height=disp_h,
                        highlightthickness=0, bg="#1a1a1a")
         cv.pack(fill=tk.BOTH, expand=True)
+        cv.bind("<Button-1>", self._on_word_click)
+        cv.bind("<Motion>",   self._on_canvas_motion)
 
         tk_img = ImageTk.PhotoImage(disp_img)
         img_id = cv.create_image(0, 0, image=tk_img, anchor="nw")
@@ -1421,6 +1423,75 @@ class App:
             self._play_event.set()
         else:
             self._highlight_at_time(pos)
+
+    def _seek_to_time(self, target_time: float, auto_play: bool = True):
+        """Seek audio to target_time (seconds). Resumes playback unless
+        auto_play is False and the audio is currently paused/idle."""
+        if self._full_audio is None or self._play_state == "generating":
+            return
+        pos = max(0.0, min(target_time, self._timeline_max - 0.05))
+        state = self._play_state
+        if state == "playing":
+            self._play_event.clear()
+            sd.stop()
+            self._pause_pos = pos
+            self._update_timeline(pos)
+            self._play_event.set()
+        elif state == "paused":
+            self._pause_pos = pos
+            self._update_timeline(pos)
+            if auto_play:
+                self._set_play_state("playing")
+                self._play_event.set()
+            else:
+                self._highlight_at_time(pos)
+        elif state in ("ready", "idle"):
+            self._pause_pos = pos
+            self._update_timeline(pos)
+            if auto_play:
+                self.stop_event.clear()
+                self._set_play_state("playing")
+                self._play_event.set()
+                threading.Thread(target=self._playback_thread, daemon=True).start()
+            else:
+                self._highlight_at_time(pos)
+
+    def _word_at_canvas_xy(self, cx: float, cy: float) -> int | None:
+        """Return the index of the word whose bbox contains (cx, cy), or None."""
+        for i, (x1, y1, x2, y2) in enumerate(self._word_bboxes_canvas):
+            if x1 <= cx <= x2 and y1 <= cy <= y2:
+                return i
+        return None
+
+    def _on_word_click(self, event):
+        """Click a word -> seek audio to that word's spoken timestamp."""
+        if self._full_audio is None or self._play_state == "generating":
+            return
+        if not self._word_bboxes_canvas or not self._word_schedule:
+            return
+        cv = self._reader_canvas
+        if cv is None:
+            return
+        idx = self._word_at_canvas_xy(cv.canvasx(event.x), cv.canvasy(event.y))
+        if idx is None:
+            return
+        # Look up the scheduled time for the clicked word; if it has none
+        # (rare — Kokoro sometimes drops a token), fall back to the latest
+        # earlier word that does have a time.
+        start_time = next((t for wi, t in self._word_schedule if wi == idx), None)
+        if start_time is None:
+            earlier = [(wi, t) for wi, t in self._word_schedule if wi < idx]
+            start_time = max(earlier, key=lambda x: x[0])[1] if earlier else 0.0
+        self._seek_to_time(start_time, auto_play=True)
+
+    def _on_canvas_motion(self, event):
+        """Show a hand cursor when hovering over a clickable word."""
+        cv = self._reader_canvas
+        if cv is None or not self._word_bboxes_canvas:
+            return
+        on_word = self._word_at_canvas_xy(
+            cv.canvasx(event.x), cv.canvasy(event.y)) is not None
+        cv.configure(cursor="hand2" if on_word else "")
 
     def _draw_highlight(self, base: Image.Image, bbox: tuple) -> ImageTk.PhotoImage:
         x1, y1, x2, y2 = bbox
