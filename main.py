@@ -131,12 +131,17 @@ def _load_models(on_status: callable, on_done: callable, on_error: callable,
         use_cuda = gpu and torch.cuda.is_available()
         device   = "cuda" if use_cuda else "cpu"
         on_status("Loading OCR model (PP-OCRv5 mobile)…")
+        # enable_mkldnn=False avoids a PaddlePaddle PIR+OneDNN crash
+        # ("ConvertPirAttribute2RuntimeAttribute not support
+        # [pir::ArrayAttribute<pir::DoubleAttribute>]") that fires on some
+        # CPUs when the OneDNN instruction set is used during inference.
         _ocr_reader = PaddleOCR(
             text_detection_model_name="PP-OCRv5_mobile_det",
             text_recognition_model_name="PP-OCRv5_mobile_rec",
             use_doc_orientation_classify=False,
             use_doc_unwarping=False,
             use_textline_orientation=False,
+            enable_mkldnn=False,
             lang="en",
         )
         on_status("Loading speech model…")

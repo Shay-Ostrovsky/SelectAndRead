@@ -29,6 +29,7 @@ PaddleOCR(
     use_doc_orientation_classify=False,
     use_doc_unwarping=False,
     use_textline_orientation=False,
+    enable_mkldnn=False,
     lang="en",
 )
 print("PaddleOCR models ready.")
