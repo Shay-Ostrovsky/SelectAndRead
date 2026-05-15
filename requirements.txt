@@ -1,6 +1,7 @@
 kokoro>=0.9.2
 sounddevice
-winocr
+paddleocr>=3.0
+paddlepaddle
 Pillow
 keyboard
 numpy

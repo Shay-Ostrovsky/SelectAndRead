@@ -21,7 +21,17 @@ try:
 except Exception as e:
     print(f"Warning: espeakng setup: {e}")
 
-print("OCR engine: using built-in Windows.Media.Ocr (no model download).")
+print("Downloading PaddleOCR PP-OCRv5 mobile (English)...")
+from paddleocr import PaddleOCR
+PaddleOCR(
+    text_detection_model_name="PP-OCRv5_mobile_det",
+    text_recognition_model_name="PP-OCRv5_mobile_rec",
+    use_doc_orientation_classify=False,
+    use_doc_unwarping=False,
+    use_textline_orientation=False,
+    lang="en",
+)
+print("PaddleOCR models ready.")
 print()
 
 print("Downloading Kokoro-82M speech model...")

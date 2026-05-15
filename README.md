@@ -9,7 +9,7 @@ A desktop OCR + neural-TTS pipeline with synchronized word highlighting, frame-a
 [![Python](https://img.shields.io/badge/python-3.10--3.12-3776AB?logo=python&logoColor=white)](https://python.org)
 [![PyTorch](https://img.shields.io/badge/PyTorch-EE4C2C?logo=pytorch&logoColor=white)](https://pytorch.org)
 [![Kokoro](https://img.shields.io/badge/TTS-Kokoro--82M-FF6B6B)](https://huggingface.co/hexgrad/Kokoro-82M)
-[![WindowsOCR](https://img.shields.io/badge/OCR-Windows.Media.Ocr-0078D6?logo=windows&logoColor=white)](https://learn.microsoft.com/en-us/uwp/api/windows.media.ocr)
+[![PaddleOCR](https://img.shields.io/badge/OCR-PP--OCRv5%20mobile-1E88E5)](https://github.com/PaddlePaddle/PaddleOCR)
 [![Platform](https://img.shields.io/badge/platform-Windows-0078D6?logo=windows&logoColor=white)](#)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](#license)
 [![CUDA](https://img.shields.io/badge/CUDA-optional-76B900?logo=nvidia&logoColor=white)](#)
@@ -39,7 +39,7 @@ Everything runs **100% locally**. No accounts, no API keys, no text leaves your 
 ```
 1.  Press the global hotkey                from anywhere on the desktop
 2.  Drag a rectangle                       across the region you want read
-3.  Windows.Media.Ocr extracts per-word    text + bboxes in reading order
+3.  PaddleOCR (PP-OCRv5 mobile EN) reads   the text + bounding boxes
 4.  Kokoro-82M generates speech            with word-level timestamps
 5.  A reader window opens                  highlighting each word as it's spoken
 ```
@@ -74,7 +74,7 @@ The reader gives you a full timeline scrubber, ±5s skip, 0.5×–2.0× speed, p
 ### Input methods
 - **Drag a screen region** with the global hotkey (works on PDFs, videos, photos, anything visible)
 - **Paste from clipboard** — `Ctrl+V` reads either an image (full OCR pipeline) or text (OCR is skipped entirely)
-- **Offline, instant OCR** — uses the built-in `Windows.Media.Ocr` engine (the same one Snipping Tool uses) — no model download, no GPU needed, per-word bboxes in proper reading order
+- **PaddleOCR (PP-OCRv5 mobile EN)** — small, fast, high-accuracy deep-learning OCR. Mobile-variant models total under ~20 MB and run on CPU comfortably.
 
 ### Reading experience
 - **Word-by-word highlighting** synchronized to audio via Kokoro's per-token timestamps
@@ -115,8 +115,9 @@ flowchart LR
     B --> C[Screenshot<br/>PIL ImageGrab]
     P -- image --> C
     P -- text --> F
-    C --> D[Windows.Media.Ocr<br/>per-word bboxes,<br/>reading order]
-    D --> E2[BBox<br/>Tightener]
+    C --> D[PaddleOCR<br/>PP-OCRv5 mobile EN<br/>line text + bboxes]
+    D --> SP[Proportional<br/>Line→Word Split]
+    SP --> E2[BBox<br/>Tightener]
     E2 --> F[Sanitized<br/>Token Stream]
     F --> G[Kokoro-82M<br/>Neural TTS]
     G --> H[Per-Token<br/>Timestamps]
@@ -139,11 +140,11 @@ The core insight is that **OCR words and TTS words don't always align 1:1** — 
 
 ## Under the Hood
 
-**Built-in Windows OCR**
-Recognition is done via `Windows.Media.Ocr` — the same engine the OS uses for *Live Text*-style features. It ships with Windows, runs offline, and returns per-word text + bounding rects in proper reading order, so the app does no model download and no chunk-splitting. The `_windows_ocr` helper wraps the async winrt call (`winocr.recognize_pil`) into a synchronous function the worker thread can use.
+**PaddleOCR PP-OCRv5 mobile**
+Recognition uses PaddleOCR's PP-OCRv5 *mobile* English models — the lightweight (~20 MB total) variant of the v5 release. Detection produces axis-aligned line bboxes; recognition reads each line. The `_paddle_ocr` helper wraps `PaddleOCR.predict()` and returns per-word entries by splitting each line bbox proportionally by character count.
 
 **Per-pixel bounding box tightening**
-Windows OCR word bboxes occasionally include trailing whitespace. Before highlighting, each bbox is shrunk to the columns that actually contain ink by analyzing per-column pixel brightness variance — so highlights cover only the word, never the space around it.
+After the proportional word split, each bbox is shrunk to the columns that actually contain ink by analyzing per-column pixel brightness variance — so highlights cover only the word, never the trailing space.
 
 **Content-based word alignment**
 TTS segments don't always map 1:1 to OCR words (Kokoro sometimes defers words like "from" near special characters to a later segment). Alignment is done by normalised text content rather than position, with a sequential cursor as fallback — so every word gets highlighted at its true audio timestamp.
@@ -170,7 +171,7 @@ The splash polls for `%TEMP%\SelectAndRead.ready`, which `main.py` writes via `r
 | Layer | Library | What it does here |
 |---|---|---|
 | **Neural TTS** | [Kokoro-82M](https://huggingface.co/hexgrad/Kokoro-82M) | 82M-parameter open-weights TTS model with per-token timestamps |
-| **OCR** | [Windows.Media.Ocr](https://learn.microsoft.com/en-us/uwp/api/windows.media.ocr) (via [winocr](https://pypi.org/project/winocr/)) | Built-in Windows OCR engine — per-word bboxes + reading order, offline, no model download |
+| **OCR** | [PaddleOCR](https://github.com/PaddlePaddle/PaddleOCR) (PP-OCRv5 mobile EN) | Lightweight high-accuracy OCR — runs on [PaddlePaddle](https://www.paddlepaddle.org.cn/), CPU-friendly |
 | **Inference runtime** | [PyTorch](https://pytorch.org) | GPU/CPU backend for both OCR and TTS models |
 | **Image processing** | [Pillow (PIL)](https://python-pillow.org) | Screenshot capture, alpha-composited highlight overlays, font rendering |
 | **Audio playback** | [sounddevice](https://python-sounddevice.readthedocs.io) | Low-latency PortAudio bindings, samplerate-based speed control |
@@ -228,5 +229,5 @@ The two **global** hotkeys are remappable from the **⚙ Settings** dialog with 
 ## Acknowledgments
 
 - **[Kokoro-82M](https://huggingface.co/hexgrad/Kokoro-82M)** by hexgrad — remarkable TTS quality at this parameter count
-- **[winocr](https://github.com/myml/winocr)** — clean Python wrapper around the `Windows.Media.Ocr` winrt API
+- **[PaddleOCR](https://github.com/PaddlePaddle/PaddleOCR)** by the PaddlePaddle team — PP-OCRv5 mobile models, excellent accuracy at small size
 - WCAG color-contrast formulas from the W3C Accessibility Guidelines

@@ -9,9 +9,8 @@ import unicodedata
 import wave
 from tkinter import ttk, colorchooser, filedialog
 
-import asyncio
-import winocr
 import numpy as np
+from paddleocr import PaddleOCR
 import sounddevice as sd
 import torch
 try:
@@ -72,35 +71,56 @@ VOICES = [
     ("bm_daniel",  "Daniel (BM)"),
 ]
 
-_ocr_reader: bool = False     # sentinel: True once Windows OCR is verified ready
+_ocr_reader: PaddleOCR | None = None
 _tts_pipeline: KPipeline | None = None
 
 
-def _windows_ocr(img_array: np.ndarray) -> list[tuple[str, tuple]]:
-    """Run Windows.Media.Ocr on a numpy image array.
-    Returns [(word, (x1, y1, x2, y2)), ...] in image pixel coords —
-    one tuple per word, in reading order."""
-    pil_img = Image.fromarray(img_array)
-    if pil_img.mode == "RGBA":
-        pil_img = pil_img.convert("RGB")
+def _paddle_ocr(img_array: np.ndarray) -> list[tuple[str, tuple]]:
+    """Run PaddleOCR (PP-OCRv5 mobile EN) on a numpy image array.
+    Returns [(word, (x1, y1, x2, y2)), ...] in image pixel coords.
 
-    # winocr.recognize_pil returns the raw winrt IAsyncOperation (not a
-    # coroutine), so we wrap it in an async def — awaiting an IAsyncOperation
-    # inside an async function triggers winrt's __await__ adapter and lets
-    # asyncio.run() drive it to completion.
-    async def _run():
-        return await winocr.recognize_pil(pil_img, "en-US")
-    result = asyncio.run(_run())
+    PaddleOCR's recognition is line-level, so each line bbox is split into
+    word bboxes proportionally by character count. _tighten_x_bbox later
+    snaps each word bbox to its actual ink columns.
+    """
+    if _ocr_reader is None:
+        return []
+    result = _ocr_reader.predict(img_array)
+    if not result:
+        return []
+    res = result[0]
+
+    texts: list[str] = list(res.get("rec_texts", []) or [])
+    boxes_raw       = res.get("rec_boxes", None)
+    if boxes_raw is None or len(texts) == 0:
+        return []
+    boxes = boxes_raw.tolist() if hasattr(boxes_raw, "tolist") else list(boxes_raw)
 
     out: list[tuple[str, tuple]] = []
-    for line in result.lines:
-        for word in line.words:
-            r = word.bounding_rect
-            out.append((
-                word.text,
-                (int(r.x), int(r.y),
-                 int(r.x + r.width), int(r.y + r.height)),
-            ))
+    for line_text, box in zip(texts, boxes):
+        if not line_text or not line_text.strip():
+            continue
+        try:
+            x1, y1, x2, y2 = int(box[0]), int(box[1]), int(box[2]), int(box[3])
+        except (TypeError, ValueError, IndexError):
+            continue
+        words = line_text.strip().split()
+        if not words:
+            continue
+        if len(words) == 1:
+            out.append((words[0], (x1, y1, x2, y2)))
+            continue
+        line_w = max(1, x2 - x1)
+        total_chars = sum(len(w) for w in words) + (len(words) - 1)
+        if total_chars <= 0:
+            continue
+        char_w = line_w / total_chars
+        cursor = float(x1)
+        for w in words:
+            w_pixels = char_w * len(w)
+            out.append((w, (int(cursor), y1,
+                            int(cursor + w_pixels), y2)))
+            cursor += w_pixels + char_w
     return out
 
 
@@ -110,11 +130,15 @@ def _load_models(on_status: callable, on_done: callable, on_error: callable,
     try:
         use_cuda = gpu and torch.cuda.is_available()
         device   = "cuda" if use_cuda else "cpu"
-        on_status("Preparing Windows OCR…")
-        # Pre-warm Windows OCR on a tiny image so any missing-language-pack
-        # error surfaces during startup instead of during the first read.
-        _windows_ocr(np.zeros((4, 4, 3), dtype=np.uint8))
-        _ocr_reader = True
+        on_status("Loading OCR model (PP-OCRv5 mobile)…")
+        _ocr_reader = PaddleOCR(
+            text_detection_model_name="PP-OCRv5_mobile_det",
+            text_recognition_model_name="PP-OCRv5_mobile_rec",
+            use_doc_orientation_classify=False,
+            use_doc_unwarping=False,
+            use_textline_orientation=False,
+            lang="en",
+        )
         on_status("Loading speech model…")
         _tts_pipeline = KPipeline(lang_code="a", repo_id="hexgrad/Kokoro-82M",
                                   device=device)
@@ -867,9 +891,9 @@ class App:
                 if image is None:
                     image = ImageGrab.grab(bbox=region, all_screens=True)
                 img_array = np.array(image)
-                # Windows OCR returns per-word bboxes in reading order, so we
-                # skip the EasyOCR per-chunk-splitting helpers entirely.
-                word_data = _windows_ocr(img_array)
+                # PaddleOCR returns line-level bboxes; _paddle_ocr splits each
+                # line into per-word boxes proportionally by character count.
+                word_data = _paddle_ocr(img_array)
                 # Pixel-tight each bbox so highlights snap to the ink columns.
                 word_data = [(w, _tighten_x_bbox(img_array, *b))
                              for w, b in word_data]
