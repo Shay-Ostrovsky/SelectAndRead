@@ -533,6 +533,7 @@ class App:
         self._word_bboxes_canvas: list[tuple] = []
         self._pause_pos = 0.0
         self._play_state = "idle"
+        self._idle_seeked = False   # user moved the slider/clicked a word after audio ended
 
         self.status_var        = tk.StringVar(value="Loading models…")
         self._highlight_color  = "#fff200"
@@ -1078,7 +1079,11 @@ class App:
     def _on_play_btn(self):
         state = self._play_state
         if state in ("ready", "idle") and self._full_audio is not None:
-            self._pause_pos = 0.0
+            # In "idle" after a seek/skip/word-click, continue from the user's
+            # new cursor position instead of restarting from the beginning.
+            if not (state == "idle" and self._idle_seeked):
+                self._pause_pos = 0.0
+            self._idle_seeked = False
             self.stop_event.clear()
             self._set_play_state("playing")
             self._play_event.set()
@@ -1341,6 +1346,7 @@ class App:
             if pb: pb.configure(state="normal", text="▶  Resume")
             self.status_var.set("Paused")
         elif state == "idle":
+            self._idle_seeked = False
             if self._full_audio is not None:
                 if sv: sv.set("Done — press Play Again to replay")
                 if pb: pb.configure(state="normal", text="▶  Play Again")
@@ -1392,6 +1398,16 @@ class App:
             self._play_event.set()
         elif self._play_state in ("paused", "ready", "idle"):
             self._highlight_at_time(pos)
+            self._mark_idle_seeked()
+
+    def _mark_idle_seeked(self):
+        """If the user moves the cursor after playback has ended, switch the
+        Play button to 'Resume' so the next click continues from the cursor
+        rather than restarting from the beginning."""
+        if self._play_state == "idle":
+            self._idle_seeked = True
+            if self._play_btn:
+                self._play_btn.configure(text="▶  Resume")
 
     def _highlight_at_time(self, pos: float):
         """Highlight the word that would be active at the given position."""
@@ -1423,6 +1439,7 @@ class App:
             self._play_event.set()
         else:
             self._highlight_at_time(pos)
+            self._mark_idle_seeked()
 
     def _seek_to_time(self, target_time: float, auto_play: bool = True):
         """Seek audio to target_time (seconds). Resumes playback unless
