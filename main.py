@@ -83,7 +83,15 @@ def _windows_ocr(img_array: np.ndarray) -> list[tuple[str, tuple]]:
     pil_img = Image.fromarray(img_array)
     if pil_img.mode == "RGBA":
         pil_img = pil_img.convert("RGB")
-    result = asyncio.run(winocr.recognize_pil(pil_img, "en-US"))
+
+    # winocr.recognize_pil returns the raw winrt IAsyncOperation (not a
+    # coroutine), so we wrap it in an async def — awaiting an IAsyncOperation
+    # inside an async function triggers winrt's __await__ adapter and lets
+    # asyncio.run() drive it to completion.
+    async def _run():
+        return await winocr.recognize_pil(pil_img, "en-US")
+    result = asyncio.run(_run())
+
     out: list[tuple[str, tuple]] = []
     for line in result.lines:
         for word in line.words:
