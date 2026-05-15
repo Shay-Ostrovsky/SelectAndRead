@@ -21,10 +21,7 @@ try:
 except Exception as e:
     print(f"Warning: espeakng setup: {e}")
 
-print("Downloading EasyOCR model (English)...")
-import easyocr
-easyocr.Reader(["en"], verbose=True)
-print("EasyOCR model ready.")
+print("OCR engine: using built-in Windows.Media.Ocr (no model download).")
 print()
 
 print("Downloading Kokoro-82M speech model...")

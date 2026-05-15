@@ -9,7 +9,7 @@ A desktop OCR + neural-TTS pipeline with synchronized word highlighting, frame-a
 [![Python](https://img.shields.io/badge/python-3.10--3.12-3776AB?logo=python&logoColor=white)](https://python.org)
 [![PyTorch](https://img.shields.io/badge/PyTorch-EE4C2C?logo=pytorch&logoColor=white)](https://pytorch.org)
 [![Kokoro](https://img.shields.io/badge/TTS-Kokoro--82M-FF6B6B)](https://huggingface.co/hexgrad/Kokoro-82M)
-[![EasyOCR](https://img.shields.io/badge/OCR-EasyOCR-4CAF50)](https://github.com/JaidedAI/EasyOCR)
+[![WindowsOCR](https://img.shields.io/badge/OCR-Windows.Media.Ocr-0078D6?logo=windows&logoColor=white)](https://learn.microsoft.com/en-us/uwp/api/windows.media.ocr)
 [![Platform](https://img.shields.io/badge/platform-Windows-0078D6?logo=windows&logoColor=white)](#)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](#license)
 [![CUDA](https://img.shields.io/badge/CUDA-optional-76B900?logo=nvidia&logoColor=white)](#)
@@ -39,10 +39,9 @@ Everything runs **100% locally**. No accounts, no API keys, no text leaves your 
 ```
 1.  Press the global hotkey                from anywhere on the desktop
 2.  Drag a rectangle                       across the region you want read
-3.  Image is upscaled + auto-contrasted    so small text is readable
-4.  EasyOCR extracts text + per-word boxes from the screenshot
-5.  Kokoro-82M generates speech            with word-level timestamps
-6.  A reader window opens                  highlighting each word as it's spoken
+3.  Windows.Media.Ocr extracts per-word    text + bboxes in reading order
+4.  Kokoro-82M generates speech            with word-level timestamps
+5.  A reader window opens                  highlighting each word as it's spoken
 ```
 
 **Paste anything** (`Ctrl+V` or the Paste button):
@@ -75,7 +74,7 @@ The reader gives you a full timeline scrubber, ±5s skip, 0.5×–2.0× speed, p
 ### Input methods
 - **Drag a screen region** with the global hotkey (works on PDFs, videos, photos, anything visible)
 - **Paste from clipboard** — `Ctrl+V` reads either an image (full OCR pipeline) or text (OCR is skipped entirely)
-- **Smart preprocessing** — small screenshots are auto-upscaled 2× with Lanczos and auto-contrasted before OCR, recovering text the original resolution couldn't see
+- **Offline, instant OCR** — uses the built-in `Windows.Media.Ocr` engine (the same one Snipping Tool uses) — no model download, no GPU needed, per-word bboxes in proper reading order
 
 ### Reading experience
 - **Word-by-word highlighting** synchronized to audio via Kokoro's per-token timestamps
@@ -93,7 +92,7 @@ The reader gives you a full timeline scrubber, ±5s skip, 0.5×–2.0× speed, p
 ### Voices and audio
 - **24 English voices** — American/British, male/female (Kokoro voice pack)
 - **WAV export** — 16-bit, 24 kHz, ready for podcast feeds or Audacity
-- **GPU acceleration** for both OCR and TTS (toggle from the UI, requires CUDA)
+- **GPU acceleration** for the TTS model (toggle from the UI, requires CUDA)
 
 ### Native Windows integration
 - **Real `.exe` launcher** built from `_launcher.cs` during setup — proper taskbar icon, no console window, animated splash while models warm up
@@ -116,11 +115,9 @@ flowchart LR
     B --> C[Screenshot<br/>PIL ImageGrab]
     P -- image --> C
     P -- text --> F
-    C --> PRE[Upscale 2× +<br/>Auto-contrast]
-    PRE --> D[EasyOCR<br/>per-word bboxes]
-    D --> E1[Pixel-Gap<br/>Word Splitter]
+    C --> D[Windows.Media.Ocr<br/>per-word bboxes,<br/>reading order]
     D --> E2[BBox<br/>Tightener]
-    E1 & E2 --> F[Sanitized<br/>Token Stream]
+    E2 --> F[Sanitized<br/>Token Stream]
     F --> G[Kokoro-82M<br/>Neural TTS]
     G --> H[Per-Token<br/>Timestamps]
     F --> I[Content-Based<br/>OCR→TTS Aligner]
@@ -131,10 +128,9 @@ flowchart LR
     L --> M[Synchronized<br/>Playback]
 
     style G fill:#FF6B6B,color:#fff
-    style D fill:#4CAF50,color:#fff
+    style D fill:#0078D6,color:#fff
     style I fill:#FFC107,color:#000
     style L fill:#2196F3,color:#fff
-    style PRE fill:#9C27B0,color:#fff
 ```
 
 The core insight is that **OCR words and TTS words don't always align 1:1** — Kokoro occasionally defers tokens (especially around special characters like ®, ©, ™) to a later segment. The aligner solves this by matching on normalized text content rather than on position, with a sequential cursor as a graceful fallback.
@@ -143,11 +139,11 @@ The core insight is that **OCR words and TTS words don't always align 1:1** — 
 
 ## Under the Hood
 
-**Smart OCR upscaling**
-Most OCR failures aren't model failures — they're starvation. EasyOCR struggles with text under ~14 px tall. Before each detection pass, the screenshot is resized 2× with Lanczos resampling and run through `ImageOps.autocontrast` (skipping if already ≥1600 px on a side). The OCR runs on the upscaled image; bboxes are then divided by 2 to remap onto the original screenshot for highlighting. This recovers most "no text detected" failures on tight UI text without changing the OCR engine.
+**Built-in Windows OCR**
+Recognition is done via `Windows.Media.Ocr` — the same engine the OS uses for *Live Text*-style features. It ships with Windows, runs offline, and returns per-word text + bounding rects in proper reading order, so the app does no model download and no chunk-splitting. The `_windows_ocr` helper wraps the async winrt call (`winocr.recognize_pil`) into a synchronous function the worker thread can use.
 
 **Per-pixel bounding box tightening**
-EasyOCR bboxes often include surrounding whitespace. Before highlighting, each bbox is shrunk to the columns that actually contain ink by analyzing per-column pixel brightness variance — so highlights cover only the word, never the space around it.
+Windows OCR word bboxes occasionally include trailing whitespace. Before highlighting, each bbox is shrunk to the columns that actually contain ink by analyzing per-column pixel brightness variance — so highlights cover only the word, never the space around it.
 
 **Content-based word alignment**
 TTS segments don't always map 1:1 to OCR words (Kokoro sometimes defers words like "from" near special characters to a later segment). Alignment is done by normalised text content rather than position, with a sequential cursor as fallback — so every word gets highlighted at its true audio timestamp.
@@ -160,9 +156,6 @@ Speed is applied by passing `samplerate=int(24000 * speed)` to `sounddevice.play
 
 **Instant seek**
 The timeline scrubber suppresses tkinter's built-in Scale widget behavior entirely (`return "break"` on press, drag, and release), computing position directly from cursor x-coordinate as a fraction of the widget width. This gives frame-accurate instant seeks instead of the widget's incremental thumb movement.
-
-**Pixel-gap word splitting**
-When EasyOCR returns multiple words in a single detection chunk, the image strip is analyzed for inter-word whitespace gaps by finding columns whose brightness variance falls below 15% of the maximum. The detected gap centers are matched to ideal split positions, giving accurate per-word bboxes without relying on character-count estimation.
 
 **Native launcher with AppUserModelID**
 A minimal C# launcher (`_launcher.cs`) is compiled to `SelectAndRead.exe` during setup using the .NET Framework `csc.exe` that ships with every Windows install — no PyInstaller, no extra build dependencies. The launcher embeds `icon.ico`, calls `SetCurrentProcessExplicitAppUserModelID("SelectAndRead.App")` before spawning Python, and shows the splash. `main.py` sets the same AUMID via ctypes when it starts, and `create_shortcut.ps1` stamps the same AUMID onto the `.lnk` file via `IShellLink + IPropertyStore`. With all three matching, Windows treats the pinned shortcut and the running app as the same identity — one taskbar button, no duplicates.
@@ -177,7 +170,7 @@ The splash polls for `%TEMP%\SelectAndRead.ready`, which `main.py` writes via `r
 | Layer | Library | What it does here |
 |---|---|---|
 | **Neural TTS** | [Kokoro-82M](https://huggingface.co/hexgrad/Kokoro-82M) | 82M-parameter open-weights TTS model with per-token timestamps |
-| **OCR** | [EasyOCR](https://github.com/JaidedAI/EasyOCR) | Deep-learning OCR — extracts per-word bounding boxes from screenshots |
+| **OCR** | [Windows.Media.Ocr](https://learn.microsoft.com/en-us/uwp/api/windows.media.ocr) (via [winocr](https://pypi.org/project/winocr/)) | Built-in Windows OCR engine — per-word bboxes + reading order, offline, no model download |
 | **Inference runtime** | [PyTorch](https://pytorch.org) | GPU/CPU backend for both OCR and TTS models |
 | **Image processing** | [Pillow (PIL)](https://python-pillow.org) | Screenshot capture, alpha-composited highlight overlays, font rendering |
 | **Audio playback** | [sounddevice](https://python-sounddevice.readthedocs.io) | Low-latency PortAudio bindings, samplerate-based speed control |
@@ -235,5 +228,5 @@ The two **global** hotkeys are remappable from the **⚙ Settings** dialog with 
 ## Acknowledgments
 
 - **[Kokoro-82M](https://huggingface.co/hexgrad/Kokoro-82M)** by hexgrad — remarkable TTS quality at this parameter count
-- **[EasyOCR](https://github.com/JaidedAI/EasyOCR)** by JaidedAI — robust ready-to-use OCR with bbox output
+- **[winocr](https://github.com/myml/winocr)** — clean Python wrapper around the `Windows.Media.Ocr` winrt API
 - WCAG color-contrast formulas from the W3C Accessibility Guidelines

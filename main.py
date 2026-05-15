@@ -9,7 +9,8 @@ import unicodedata
 import wave
 from tkinter import ttk, colorchooser, filedialog
 
-import easyocr
+import asyncio
+import winocr
 import numpy as np
 import sounddevice as sd
 import torch
@@ -25,7 +26,7 @@ try:
 except Exception:
     pass
 from kokoro import KPipeline
-from PIL import Image, ImageDraw, ImageFont, ImageOps, ImageTk, ImageGrab
+from PIL import Image, ImageDraw, ImageFont, ImageTk, ImageGrab
 import keyboard
 
 try:
@@ -71,8 +72,28 @@ VOICES = [
     ("bm_daniel",  "Daniel (BM)"),
 ]
 
-_ocr_reader: easyocr.Reader | None = None
+_ocr_reader: bool = False     # sentinel: True once Windows OCR is verified ready
 _tts_pipeline: KPipeline | None = None
+
+
+def _windows_ocr(img_array: np.ndarray) -> list[tuple[str, tuple]]:
+    """Run Windows.Media.Ocr on a numpy image array.
+    Returns [(word, (x1, y1, x2, y2)), ...] in image pixel coords —
+    one tuple per word, in reading order."""
+    pil_img = Image.fromarray(img_array)
+    if pil_img.mode == "RGBA":
+        pil_img = pil_img.convert("RGB")
+    result = asyncio.run(winocr.recognize_pil(pil_img, "en-US"))
+    out: list[tuple[str, tuple]] = []
+    for line in result.lines:
+        for word in line.words:
+            r = word.bounding_rect
+            out.append((
+                word.text,
+                (int(r.x), int(r.y),
+                 int(r.x + r.width), int(r.y + r.height)),
+            ))
+    return out
 
 
 def _load_models(on_status: callable, on_done: callable, on_error: callable,
@@ -81,8 +102,11 @@ def _load_models(on_status: callable, on_done: callable, on_error: callable,
     try:
         use_cuda = gpu and torch.cuda.is_available()
         device   = "cuda" if use_cuda else "cpu"
-        on_status("Loading OCR model…")
-        _ocr_reader = easyocr.Reader(["en"], gpu=use_cuda, verbose=False)
+        on_status("Preparing Windows OCR…")
+        # Pre-warm Windows OCR on a tiny image so any missing-language-pack
+        # error surfaces during startup instead of during the first read.
+        _windows_ocr(np.zeros((4, 4, 3), dtype=np.uint8))
+        _ocr_reader = True
         on_status("Loading speech model…")
         _tts_pipeline = KPipeline(lang_code="a", repo_id="hexgrad/Kokoro-82M",
                                   device=device)
@@ -300,119 +324,6 @@ def _tighten_x_bbox(img_array: np.ndarray,
     if len(text_cols) == 0:
         return x1, y1, x2, y2
     return float(xa + text_cols[0]), y1, float(xa + text_cols[-1] + 1), y2
-
-
-def _pixel_gap_split(img_array, cx1, cy1, cx2, cy2, n) -> list[float] | None:
-    """
-    Return n-1 x-split positions (relative to cx1) that separate n words
-    by finding the actual whitespace gaps in the image strip.
-    Returns None if not enough gaps are found.
-    """
-    xa, ya, xb, yb = int(cx1), int(cy1), int(cx2), int(cy2)
-    strip = img_array[ya:yb, xa:xb]
-    if strip.shape[0] < 2 or strip.shape[1] < n * 3:
-        return None
-
-    gray = strip.mean(axis=2) if strip.ndim == 3 else strip.astype(float)
-
-    # Per-column: how much text energy (deviation from the brightest value)
-    col_dark = gray.max() - gray.min(axis=0)
-    if col_dark.max() < 8:          # image too uniform to detect anything
-        return None
-
-    # Light smoothing to kill single-pixel noise
-    k = max(1, strip.shape[1] // 80)
-    if k > 1:
-        col_dark = np.convolve(col_dark, np.ones(k) / k, mode="same")
-
-    # Gap = column whose text energy is below 15 % of the maximum
-    thresh = col_dark.max() * 0.15
-    is_gap = col_dark < thresh
-
-    # Collect gap-run center positions
-    centers = []
-    in_gap, start = False, 0
-    for i, g in enumerate(is_gap):
-        if g and not in_gap:
-            in_gap, start = True, i
-        elif not g and in_gap:
-            in_gap = False
-            centers.append((start + i) // 2)
-    if in_gap:
-        centers.append((start + len(is_gap)) // 2)
-
-    if len(centers) < n - 1:
-        return None
-
-    # Pick the n-1 gap centers closest to the ideal even-split positions
-    ideal = [(i + 1) * strip.shape[1] / n for i in range(n - 1)]
-    available = list(centers)
-    chosen = []
-    for ix in ideal:
-        best = min(available, key=lambda c: abs(c - ix))
-        chosen.append(best)
-        available.remove(best)
-    return sorted(chosen)
-
-
-def _preprocess_for_ocr(img_array: np.ndarray) -> tuple[np.ndarray, float]:
-    """Upscale + autocontrast small images for better OCR accuracy.
-    Returns (processed_array, bbox_scale_back) — bboxes from OCR on the
-    processed array must be multiplied by scale_back to map to original coords.
-    """
-    h, w = img_array.shape[:2]
-    pil = Image.fromarray(img_array)
-    if pil.mode == "RGBA":
-        pil = pil.convert("RGB")
-    if max(h, w) >= 1600:
-        pil = ImageOps.autocontrast(pil, cutoff=1)
-        return np.array(pil), 1.0
-    pil = pil.resize((w * 2, h * 2), Image.LANCZOS)
-    pil = ImageOps.autocontrast(pil, cutoff=1)
-    return np.array(pil), 0.5
-
-
-def _extract_word_bboxes(ocr_results, img_array=None) -> list[tuple[str, tuple]]:
-    """Return [(word, (x1,y1,x2,y2)), ...] in image pixel coords."""
-    words = []
-    for bbox, chunk_text, _ in ocr_results:
-        if not chunk_text or not chunk_text.strip():
-            continue
-        xs = [p[0] for p in bbox]
-        ys = [p[1] for p in bbox]
-        cx1, cy1, cx2, cy2 = min(xs), min(ys), max(xs), max(ys)
-        parts = chunk_text.strip().split()
-        if not parts:
-            continue
-        def _tight(b):
-            return _tighten_x_bbox(img_array, *b) if img_array is not None else b
-
-        if len(parts) == 1:
-            words.append((parts[0], _tight((cx1, cy1, cx2, cy2))))
-            continue
-
-        # First choice: find gaps in the actual pixels
-        split_xs = (
-            _pixel_gap_split(img_array, cx1, cy1, cx2, cy2, len(parts))
-            if img_array is not None else None
-        )
-        if split_xs is not None:
-            boundaries = [cx1] + [cx1 + x for x in split_xs] + [cx2]
-            for i, w in enumerate(parts):
-                words.append((w, _tight((boundaries[i], cy1, boundaries[i + 1], cy2))))
-            continue
-
-        # Fallback: proportional by character count
-        chunk_w = cx2 - cx1
-        total_chars = sum(len(w) for w in parts) + (len(parts) - 1)
-        if total_chars <= 0 or chunk_w <= 0:
-            continue
-        char_w = chunk_w / total_chars
-        cursor = cx1
-        for w in parts:
-            words.append((w, _tight((cursor, cy1, cursor + char_w * len(w), cy2))))
-            cursor += char_w * len(w) + char_w
-    return words
 
 
 # ── Misc helpers ─────────────────────────────────────────────────────────────
@@ -640,7 +551,7 @@ class App:
 
         gf = ttk.Frame(self.root)
         gf.pack(**pad)
-        ttk.Checkbutton(gf, text="Use GPU  (faster OCR, requires CUDA)",
+        ttk.Checkbutton(gf, text="Use GPU for speech  (requires CUDA)",
                         variable=self._gpu_var,
                         command=self._on_gpu_toggle).pack(side=tk.LEFT)
 
@@ -948,17 +859,12 @@ class App:
                 if image is None:
                     image = ImageGrab.grab(bbox=region, all_screens=True)
                 img_array = np.array(image)
-                # Upscale + auto-contrast small images so EasyOCR sees enough
-                # pixels per character — recovers most "no text detected"
-                # failures on tight UI text without changing the OCR model.
-                img_for_ocr, bbox_scale = _preprocess_for_ocr(img_array)
-                # width_ths=0.01 tells EasyOCR not to merge nearby words,
-                # so we get per-word bboxes directly from the detector.
-                ocr_results = _ocr_reader.readtext(img_for_ocr, width_ths=0.01)
-                word_data = _extract_word_bboxes(ocr_results, img_for_ocr)
-                if bbox_scale != 1.0:
-                    word_data = [(w, tuple(int(c * bbox_scale) for c in b))
-                                 for w, b in word_data]
+                # Windows OCR returns per-word bboxes in reading order, so we
+                # skip the EasyOCR per-chunk-splitting helpers entirely.
+                word_data = _windows_ocr(img_array)
+                # Pixel-tight each bbox so highlights snap to the ink columns.
+                word_data = [(w, _tighten_x_bbox(img_array, *b))
+                             for w, b in word_data]
 
                 if not word_data:
                     self.root.after(0, lambda: self.status_var.set("No text detected"))
