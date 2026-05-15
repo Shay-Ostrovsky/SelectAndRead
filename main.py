@@ -373,16 +373,9 @@ def _preprocess_for_ocr(img_array: np.ndarray) -> tuple[np.ndarray, float]:
 
 
 def _extract_word_bboxes(ocr_results, img_array=None) -> list[tuple[str, tuple]]:
-    """Return [(word, (x1,y1,x2,y2)), ...] in image pixel coords.
-
-    Accepts both EasyOCR output formats:
-    - paragraph=False: (bbox, text, confidence)
-    - paragraph=True:  (bbox, text)
-    """
+    """Return [(word, (x1,y1,x2,y2)), ...] in image pixel coords."""
     words = []
-    for item in ocr_results:
-        bbox       = item[0]
-        chunk_text = item[1]
+    for bbox, chunk_text, _ in ocr_results:
         if not chunk_text or not chunk_text.strip():
             continue
         xs = [p[0] for p in bbox]
@@ -956,11 +949,9 @@ class App:
                 # pixels per character — recovers most "no text detected"
                 # failures on tight UI text without changing the OCR model.
                 img_for_ocr, bbox_scale = _preprocess_for_ocr(img_array)
-                # paragraph=True groups detections into proper reading order so
-                # the TTS doesn't jump around between columns or skip ahead.
-                # width_ths=0.01 keeps per-word detection within each paragraph.
-                ocr_results = _ocr_reader.readtext(
-                    img_for_ocr, width_ths=0.01, paragraph=True)
+                # width_ths=0.01 tells EasyOCR not to merge nearby words,
+                # so we get per-word bboxes directly from the detector.
+                ocr_results = _ocr_reader.readtext(img_for_ocr, width_ths=0.01)
                 word_data = _extract_word_bboxes(ocr_results, img_for_ocr)
                 if bbox_scale != 1.0:
                     word_data = [(w, tuple(int(c * bbox_scale) for c in b))
