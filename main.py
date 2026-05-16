@@ -475,6 +475,7 @@ class App:
 
         self.stop_event  = threading.Event()
         self._play_event = threading.Event()   # set=playing  clear=paused/stopped
+        self._seek_event = threading.Event()   # set=seek requested while playing
 
         self._full_audio: np.ndarray | None = None
         self._word_schedule: list[tuple[int, float]] = []
@@ -1042,6 +1043,8 @@ class App:
             self._play_event.set()
 
     def _playback_thread(self):
+        # Drain any stale seek signal from a previous run
+        self._seek_event.clear()
         start_pos = self._pause_pos
 
         while True:
@@ -1063,6 +1066,7 @@ class App:
                        if t >= start_pos - 0.01]
 
             paused_at: float | None = None
+            seek_to:   float | None = None
             for word_idx, abs_start in pending:
                 if self.stop_event.is_set():
                     sd.stop()
@@ -1079,6 +1083,13 @@ class App:
                     if self.stop_event.wait(chunk):
                         sd.stop()
                         return
+                    # IMPORTANT: check seek_event BEFORE play_event so a click-
+                    # to-seek can't be misread as a pause.
+                    if self._seek_event.is_set():
+                        self._seek_event.clear()
+                        seek_to = self._pause_pos
+                        sd.stop()
+                        break
                     if not self._play_event.is_set():
                         paused_at = start_pos + (time.monotonic() - t0) * speed
                         sd.stop()
@@ -1088,7 +1099,7 @@ class App:
                         self.root.after(0, self._update_timeline, cur)
                         last_ui = now
 
-                if paused_at is not None:
+                if seek_to is not None or paused_at is not None:
                     break
                 if self.stop_event.is_set():
                     sd.stop()
@@ -1096,12 +1107,19 @@ class App:
 
                 self.root.after(0, self._highlight_word, word_idx)
 
+            if seek_to is not None:
+                start_pos = seek_to
+                continue
+
             if paused_at is not None:
                 self._pause_pos = paused_at
                 self.root.after(0, self._update_timeline, paused_at)
                 while not self._play_event.wait(0.05):
                     if self.stop_event.is_set():
                         return
+                    # While paused, a click-to-seek goes through the "paused"
+                    # branch of _seek_to_time which just updates _pause_pos
+                    # and sets _play_event — no special handling needed here.
                 start_pos = self._pause_pos
                 continue
 
@@ -1375,18 +1393,12 @@ class App:
         """Jump forward (delta > 0) or backward (delta < 0) by delta seconds."""
         if self._full_audio is None or self._play_state == "generating":
             return
-        was_playing = self._play_state == "playing"
-        if was_playing:
-            self._play_event.clear()
-            sd.stop()
         pos = max(0.0, min(self._timeline_var.get() + delta,
                            self._timeline_max - 0.05))
-        self._pause_pos = pos
-        self._update_timeline(pos)
-        if was_playing:
-            self._play_event.set()
-        else:
-            self._highlight_at_time(pos)
+        was_playing = self._play_state == "playing"
+        # Reuse the seek path so we share its race-free seek_event handling.
+        self._seek_to_time(pos, auto_play=was_playing)
+        if not was_playing:
             self._mark_idle_seeked()
 
     def _seek_to_time(self, target_time: float, auto_play: bool = True):
@@ -1397,11 +1409,14 @@ class App:
         pos = max(0.0, min(target_time, self._timeline_max - 0.05))
         state = self._play_state
         if state == "playing":
-            self._play_event.clear()
-            sd.stop()
+            # Set the new position FIRST, then signal the worker via seek_event,
+            # then stop the current sd.play(). The worker checks seek_event
+            # before pause-detection, so it can't race-condition itself into
+            # "I was paused" and overwrite our new _pause_pos.
             self._pause_pos = pos
             self._update_timeline(pos)
-            self._play_event.set()
+            self._seek_event.set()
+            sd.stop()
         elif state == "paused":
             self._pause_pos = pos
             self._update_timeline(pos)
