@@ -486,14 +486,18 @@ class App:
         self._extracted_text: str | None = None
 
         # Live elapsed-time counter + progress bar for the scanning phase.
-        # No estimation: during OCR the bar is indeterminate; during TTS
-        # it's driven by chars_processed / total_chars from real Kokoro
-        # output, and the ETA is extrapolated from the observed rate.
+        # During OCR the bar is indeterminate (no data to compute %). During
+        # TTS, _scan_observed_rate (fraction-of-work-per-second-of-TTS) is
+        # recomputed per Kokoro segment and the tick handler uses it to:
+        #   - extrapolate displayed progress smoothly between segments
+        #   - compute total expected time as ocr_elapsed + 1/rate (stable
+        #     between segments, only refines when a new segment arrives)
         self._scan_start: float | None = None
-        self._tts_start:  float | None = None     # set when OCR finishes
+        self._tts_start:  float | None = None
         self._scan_base_msg: str = ""
         self._scan_phase: str = ""                # "ocr" or "tts"
-        self._scan_actual_progress: float = 0.0   # 0..1, set per TTS segment
+        self._scan_actual_progress: float = 0.0   # 0..1, last segment's value
+        self._scan_observed_rate: float | None = None
         self._scan_tick_running = False
         self._scan_progress_bar = None
         self._reader_progress_bar = None
@@ -910,6 +914,7 @@ class App:
         if self._play_state != "generating" or self._scan_start is None:
             self._scan_start = None
             self._tts_start  = None
+            self._scan_observed_rate = None
             self._scan_tick_running = False
             self._scan_phase = ""
             if self._scan_progress_bar is not None:
@@ -921,23 +926,24 @@ class App:
                 try: self._reader_progress_bar.pack_forget()
                 except tk.TclError: pass
             return
-        elapsed = time.monotonic() - self._scan_start
-        if self._scan_phase == "tts":
-            pct_val = max(0.0, min(99.0, self._scan_actual_progress * 100.0))
-            # Extrapolate total scan time from the actual TTS rate. Wait
-            # until ≥5 % so the first-segment startup transient doesn't
-            # produce a wildly wrong number on screen.
-            total_s: float | None = None
-            if (self._tts_start is not None
-                    and self._scan_actual_progress >= 0.05):
-                tts_elapsed = time.monotonic() - self._tts_start
-                ocr_elapsed = self._tts_start - self._scan_start
-                total_s = ocr_elapsed + tts_elapsed / self._scan_actual_progress
-            if total_s is not None:
-                text = (f"{self._scan_base_msg}  "
-                        f"({elapsed:.1f}s / ~{total_s:.1f}s — {pct_val:.0f}%)")
-            else:
-                text = f"{self._scan_base_msg}  ({elapsed:.1f}s — {pct_val:.0f}%)"
+        now = time.monotonic()
+        elapsed = now - self._scan_start
+        if (self._scan_phase == "tts" and self._tts_start is not None
+                and self._scan_observed_rate is not None):
+            # Smooth predicted progress between Kokoro segments using the
+            # rate measured at the previous segment boundary. Never goes
+            # backwards: the displayed value is max(measured, predicted).
+            rate = self._scan_observed_rate                 # fraction / sec
+            tts_elapsed = now - self._tts_start
+            predicted   = min(0.99, rate * tts_elapsed)
+            display     = max(self._scan_actual_progress, predicted)
+            pct_val     = max(0.0, min(99.0, display * 100.0))
+            ocr_elapsed = self._tts_start - self._scan_start
+            # total_expected stays steady between segments because rate
+            # doesn't change; the next segment refines it.
+            total_s = ocr_elapsed + 1.0 / rate
+            text = (f"{self._scan_base_msg}  "
+                    f"({elapsed:.1f}s / ~{total_s:.1f}s — {pct_val:.0f}%)")
             if self._scan_progress_bar is not None:
                 try: self._scan_progress_bar["value"] = pct_val
                 except tk.TclError: pass
@@ -957,12 +963,11 @@ class App:
         self._scan_base_msg = msg
 
     def _enter_tts_phase(self):
-        """OCR is done; flip the bar to determinate so the chars-done
-        fraction starts driving the displayed value, and start the TTS
-        wall-clock so we can extrapolate ETA from observed rate."""
+        """OCR is done; flip the bar to determinate. The worker thread
+        already stamped self._tts_start just before the Kokoro loop."""
         self._scan_phase = "tts"
-        self._tts_start = time.monotonic()
         self._scan_actual_progress = 0.0
+        self._scan_observed_rate   = None
         if self._scan_progress_bar is not None:
             try:
                 self._scan_progress_bar.stop()
@@ -1036,7 +1041,10 @@ class App:
                     disp_bboxes  = img_bboxes
             self._extracted_text = tts_text
             # OCR done — flip the progress bar from indeterminate animation
-            # to determinate mode. The TTS loop below pushes actual progress.
+            # to determinate mode. Stamp tts_start here on the worker thread
+            # (rather than from _enter_tts_phase, which runs later on the Tk
+            # thread) so the tick handler sees the real TTS start instant.
+            self._tts_start = time.monotonic()
             self.root.after(0, self._enter_tts_phase)
             if self._highlight_mode.get() == "auto":
                 arr = np.array(pil_img)
@@ -1127,7 +1135,15 @@ class App:
                 running += duration
                 # Real progress: how much of the input text Kokoro has voiced.
                 chars_done += len(seg_text)
-                self._scan_actual_progress = min(1.0, chars_done / total_chars)
+                progress_now = min(1.0, chars_done / total_chars)
+                # Recompute the observed rate so the tick handler can
+                # interpolate progress (and ETA) smoothly until the next
+                # segment lands.
+                if self._tts_start is not None:
+                    tts_elapsed_now = time.monotonic() - self._tts_start
+                    if tts_elapsed_now > 0:
+                        self._scan_observed_rate = progress_now / tts_elapsed_now
+                self._scan_actual_progress = progress_now
 
             if self.stop_event.is_set() or not audio_chunks:
                 return
