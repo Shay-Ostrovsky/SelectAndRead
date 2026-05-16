@@ -487,10 +487,12 @@ class App:
 
         # Live elapsed-time counter + progress bar for the scanning phase.
         # No estimation: during OCR the bar is indeterminate; during TTS
-        # it's driven by chars_processed / total_chars from real Kokoro output.
+        # it's driven by chars_processed / total_chars from real Kokoro
+        # output, and the ETA is extrapolated from the observed rate.
         self._scan_start: float | None = None
+        self._tts_start:  float | None = None     # set when OCR finishes
         self._scan_base_msg: str = ""
-        self._scan_phase: str = ""           # "ocr" or "tts"
+        self._scan_phase: str = ""                # "ocr" or "tts"
         self._scan_actual_progress: float = 0.0   # 0..1, set per TTS segment
         self._scan_tick_running = False
         self._scan_progress_bar = None
@@ -907,6 +909,7 @@ class App:
         """Update elapsed-time text and (during TTS) the determinate bar."""
         if self._play_state != "generating" or self._scan_start is None:
             self._scan_start = None
+            self._tts_start  = None
             self._scan_tick_running = False
             self._scan_phase = ""
             if self._scan_progress_bar is not None:
@@ -921,7 +924,20 @@ class App:
         elapsed = time.monotonic() - self._scan_start
         if self._scan_phase == "tts":
             pct_val = max(0.0, min(99.0, self._scan_actual_progress * 100.0))
-            text = f"{self._scan_base_msg}  ({elapsed:.1f}s — {pct_val:.0f}%)"
+            # Extrapolate total scan time from the actual TTS rate. Wait
+            # until ≥5 % so the first-segment startup transient doesn't
+            # produce a wildly wrong number on screen.
+            total_s: float | None = None
+            if (self._tts_start is not None
+                    and self._scan_actual_progress >= 0.05):
+                tts_elapsed = time.monotonic() - self._tts_start
+                ocr_elapsed = self._tts_start - self._scan_start
+                total_s = ocr_elapsed + tts_elapsed / self._scan_actual_progress
+            if total_s is not None:
+                text = (f"{self._scan_base_msg}  "
+                        f"({elapsed:.1f}s / ~{total_s:.1f}s — {pct_val:.0f}%)")
+            else:
+                text = f"{self._scan_base_msg}  ({elapsed:.1f}s — {pct_val:.0f}%)"
             if self._scan_progress_bar is not None:
                 try: self._scan_progress_bar["value"] = pct_val
                 except tk.TclError: pass
@@ -942,8 +958,10 @@ class App:
 
     def _enter_tts_phase(self):
         """OCR is done; flip the bar to determinate so the chars-done
-        fraction starts driving the displayed value."""
+        fraction starts driving the displayed value, and start the TTS
+        wall-clock so we can extrapolate ETA from observed rate."""
         self._scan_phase = "tts"
+        self._tts_start = time.monotonic()
         self._scan_actual_progress = 0.0
         if self._scan_progress_bar is not None:
             try:
