@@ -535,6 +535,9 @@ class App:
         self.root.bind_all("<Control-v>", self._do_paste)
         self.root.bind_all("<Control-V>", self._do_paste)
         self._register_hotkey()
+        # Re-install the global hotkeys every 30 s in case Windows silently
+        # dropped them (low-level hook timeout, session change, screen lock).
+        self.root.after(30_000, self._hotkey_watchdog)
         threading.Thread(
             target=_load_models,
             args=(
@@ -666,6 +669,18 @@ class App:
         except Exception:
             pass
         self._register_hotkey()
+
+    def _hotkey_watchdog(self):
+        """Periodically re-install the global hotkeys. Windows can silently
+        drop low-level keyboard hooks after long idle, session changes,
+        screen-lock, or if a callback ever overran the LowLevelHooksTimeout.
+        Re-registering every 30 s makes the app self-heal within that window
+        without the user noticing."""
+        try:
+            self._reregister_hotkeys()
+        except Exception:
+            pass
+        self.root.after(30_000, self._hotkey_watchdog)
 
     def _load_settings(self):
         try:
