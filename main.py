@@ -485,10 +485,13 @@ class App:
         self._idle_seeked = False   # user moved the slider/clicked a word after audio ended
         self._extracted_text: str | None = None
 
-        # Live elapsed-time counter + progress bar for the scanning phase
+        # Live elapsed-time counter + progress bar for the scanning phase.
+        # No estimation: during OCR the bar is indeterminate; during TTS
+        # it's driven by chars_processed / total_chars from real Kokoro output.
         self._scan_start: float | None = None
         self._scan_base_msg: str = ""
-        self._scan_estimated_total: float = 5.0
+        self._scan_phase: str = ""           # "ocr" or "tts"
+        self._scan_actual_progress: float = 0.0   # 0..1, set per TTS segment
         self._scan_tick_running = False
         self._scan_progress_bar = None
         self._reader_progress_bar = None
@@ -876,17 +879,22 @@ class App:
         self._extracted_text = None
         self._pause_pos = 0.0
         self._play_state = "generating"
-        # Start the elapsed timer: status text gets a live "(N.Ns / ~M.Ms)"
-        # suffix and the progress bar fills until the state leaves
-        # "generating". Initial estimate is rough; refined post-OCR by
-        # _refine_scan_estimate once we know the word count.
+        # OCR phase: we have no information to predict from, so the bar runs
+        # in indeterminate mode (an animated bouncing thumb). When TTS starts
+        # _enter_tts_phase swaps it to determinate and the actual chars-done
+        # fraction drives the value.
         self._scan_start = time.monotonic()
         self._scan_base_msg = "Scanning…"
-        self._scan_estimated_total = 5.0
+        self._scan_phase = "ocr"
+        self._scan_actual_progress = 0.0
         self.status_var.set(self._scan_base_msg)
         if self._scan_progress_bar is not None:
-            self._scan_progress_bar["value"] = 0
+            try: self._scan_progress_bar.stop()
+            except tk.TclError: pass
+            self._scan_progress_bar.config(mode="indeterminate")
             self._scan_progress_bar.pack(pady=(0, 8))
+            try: self._scan_progress_bar.start(12)
+            except tk.TclError: pass
         if not self._scan_tick_running:
             self._scan_tick_running = True
             self.root.after(100, self._tick_scan_timer)
@@ -896,12 +904,14 @@ class App:
             daemon=True).start()
 
     def _tick_scan_timer(self):
-        """Append elapsed/estimated to status text and update progress bars."""
+        """Update elapsed-time text and (during TTS) the determinate bar."""
         if self._play_state != "generating" or self._scan_start is None:
-            # Generation finished — clean up timer state and hide the bars
             self._scan_start = None
             self._scan_tick_running = False
+            self._scan_phase = ""
             if self._scan_progress_bar is not None:
+                try: self._scan_progress_bar.stop()
+                except tk.TclError: pass
                 try: self._scan_progress_bar.pack_forget()
                 except tk.TclError: pass
             if self._reader_progress_bar is not None:
@@ -909,17 +919,20 @@ class App:
                 except tk.TclError: pass
             return
         elapsed = time.monotonic() - self._scan_start
-        est = max(0.1, self._scan_estimated_total)
-        pct = min(99.0, (elapsed / est) * 100.0)
-        text = f"{self._scan_base_msg}  ({elapsed:.1f}s / ~{est:.1f}s)"
+        if self._scan_phase == "tts":
+            pct_val = max(0.0, min(99.0, self._scan_actual_progress * 100.0))
+            text = f"{self._scan_base_msg}  ({elapsed:.1f}s — {pct_val:.0f}%)"
+            if self._scan_progress_bar is not None:
+                try: self._scan_progress_bar["value"] = pct_val
+                except tk.TclError: pass
+            if self._reader_progress_bar is not None:
+                try: self._reader_progress_bar["value"] = pct_val
+                except tk.TclError: pass
+        else:
+            text = f"{self._scan_base_msg}  ({elapsed:.1f}s)"
         self.status_var.set(text)
-        if self._scan_progress_bar is not None:
-            self._scan_progress_bar["value"] = pct
         if self._reader_status_var is not None:
             try: self._reader_status_var.set(text)
-            except tk.TclError: pass
-        if self._reader_progress_bar is not None:
-            try: self._reader_progress_bar["value"] = pct
             except tk.TclError: pass
         self.root.after(100, self._tick_scan_timer)
 
@@ -927,18 +940,22 @@ class App:
         """Update the base status text; the timer adds the elapsed suffix."""
         self._scan_base_msg = msg
 
-    def _refine_scan_estimate(self, word_count: int):
-        """After OCR, refine the total scan-time estimate from word count.
-        Kokoro on CPU takes roughly 0.4 s per word; on a working CUDA GPU
-        it's an order of magnitude faster."""
-        if word_count <= 0 or self._scan_start is None:
-            return
-        gpu_active = self._gpu_var.get() and torch.cuda.is_available()
-        rate = 0.05 if gpu_active else 0.4
-        tts_est = max(1.0, word_count * rate)
-        ocr_elapsed = time.monotonic() - self._scan_start
-        # 0.3 s tail for reader-show + UI updates after TTS finishes
-        self._scan_estimated_total = ocr_elapsed + tts_est + 0.3
+    def _enter_tts_phase(self):
+        """OCR is done; flip the bar to determinate so the chars-done
+        fraction starts driving the displayed value."""
+        self._scan_phase = "tts"
+        self._scan_actual_progress = 0.0
+        if self._scan_progress_bar is not None:
+            try:
+                self._scan_progress_bar.stop()
+                self._scan_progress_bar.config(mode="determinate", maximum=100)
+                self._scan_progress_bar["value"] = 0
+            except tk.TclError: pass
+        if self._reader_progress_bar is not None:
+            try:
+                self._reader_progress_bar.config(mode="determinate", maximum=100)
+                self._reader_progress_bar["value"] = 0
+            except tk.TclError: pass
 
     def _stop(self):
         self.stop_event.set()
@@ -1000,9 +1017,9 @@ class App:
                     pil_img      = Image.fromarray(img_array)
                     disp_bboxes  = img_bboxes
             self._extracted_text = tts_text
-            # Now that the OCR'd word count is known, refine the ETA so the
-            # progress bar reflects the actual workload before TTS begins.
-            self.root.after(0, self._refine_scan_estimate, len(ocr_words))
+            # OCR done — flip the progress bar from indeterminate animation
+            # to determinate mode. The TTS loop below pushes actual progress.
+            self.root.after(0, self._enter_tts_phase)
             if self._highlight_mode.get() == "auto":
                 arr = np.array(pil_img)
                 bg_hex, text_hex = _detect_image_colors(arr, disp_bboxes)
@@ -1027,6 +1044,11 @@ class App:
             audio_chunks: list = []
             schedule: list[tuple[int, float]] = []
             running = 0.0
+            # Total characters in the TTS input. Each Kokoro segment yields
+            # a `graphemes` substring; their cumulative length over total
+            # gives the real fraction completed — no estimation needed.
+            total_chars = max(1, len(tts_text))
+            chars_done = 0
 
             for result in _tts_pipeline(tts_text, voice=self._voice_id):
                 if self.stop_event.is_set():
@@ -1085,6 +1107,9 @@ class App:
 
                 audio_chunks.append(audio)
                 running += duration
+                # Real progress: how much of the input text Kokoro has voiced.
+                chars_done += len(seg_text)
+                self._scan_actual_progress = min(1.0, chars_done / total_chars)
 
             if self.stop_event.is_set() or not audio_chunks:
                 return
