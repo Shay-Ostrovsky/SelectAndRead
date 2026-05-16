@@ -485,6 +485,11 @@ class App:
         self._idle_seeked = False   # user moved the slider/clicked a word after audio ended
         self._extracted_text: str | None = None
 
+        # Live elapsed-time counter for the scanning + speech-generation phase
+        self._scan_start: float | None = None
+        self._scan_base_msg: str = ""
+        self._scan_tick_running = False
+
         self.status_var        = tk.StringVar(value="Loading models…")
         self._highlight_color  = "#fff200"
         self._highlight_mode   = tk.StringVar(value="auto")
@@ -862,11 +867,38 @@ class App:
         self._extracted_text = None
         self._pause_pos = 0.0
         self._play_state = "generating"
-        self.status_var.set("Scanning…")
+        # Start the elapsed timer: status text gets a live "(N.Ns)" suffix
+        # until the state leaves "generating".
+        self._scan_start = time.monotonic()
+        self._scan_base_msg = "Scanning…"
+        self.status_var.set(self._scan_base_msg)
+        if not self._scan_tick_running:
+            self._scan_tick_running = True
+            self.root.after(100, self._tick_scan_timer)
         threading.Thread(
             target=self._generate,
             kwargs={"region": region, "image": image, "text": text},
             daemon=True).start()
+
+    def _tick_scan_timer(self):
+        """Append elapsed seconds to the status text while generating."""
+        if self._play_state != "generating" or self._scan_start is None:
+            self._scan_start = None
+            self._scan_tick_running = False
+            return
+        elapsed = time.monotonic() - self._scan_start
+        text = f"{self._scan_base_msg}  ({elapsed:.1f}s)"
+        self.status_var.set(text)
+        if self._reader_status_var is not None:
+            try:
+                self._reader_status_var.set(text)
+            except tk.TclError:
+                pass
+        self.root.after(100, self._tick_scan_timer)
+
+    def _set_scan_status(self, msg: str):
+        """Update the base status text; the timer adds the elapsed suffix."""
+        self._scan_base_msg = msg
 
     def _stop(self):
         self.stop_event.set()
@@ -934,7 +966,7 @@ class App:
                 self.root.after(0, self._apply_highlight_color,
                                 optimal_highlight(bg_hex, text_hex))
             self.root.after(0, self._show_reader, pil_img, disp_bboxes, region)
-            self.root.after(0, lambda: self.status_var.set("Generating speech…"))
+            self.root.after(0, self._set_scan_status, "Generating speech…")
 
             # Content-based alignment structures: match TTS words to OCR words
             # by normalised text rather than by position.  This handles the case
