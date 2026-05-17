@@ -7,7 +7,7 @@ import time
 import tkinter as tk
 import unicodedata
 import wave
-from tkinter import ttk, colorchooser, filedialog
+from tkinter import ttk, colorchooser, filedialog, messagebox
 
 import numpy as np
 from paddleocr import PaddleOCR
@@ -526,6 +526,10 @@ class App:
         self._hotkey_pause      = "shift+x"
         self._voice_id          = VOICES[0][0]
         self._gpu_var           = tk.BooleanVar(value=False)
+        # Populated by _load_settings / _register_hotkey if anything went
+        # wrong; surfaced to the user once the UI is alive.
+        self._settings_load_error: str | None = None
+        self._hotkey_register_error: list[str] | None = None
         self._load_settings()
 
         self._build_ui()
@@ -535,9 +539,15 @@ class App:
         self.root.bind_all("<Control-v>", self._do_paste)
         self.root.bind_all("<Control-V>", self._do_paste)
         self._register_hotkey()
-        # Re-install the global hotkeys every 30 s in case Windows silently
-        # dropped them (low-level hook timeout, session change, screen lock).
+        # Watchdog ticks every 30 s and self-heals dropped hooks.
         self.root.after(30_000, self._hotkey_watchdog)
+        # Surface a corrupt-settings error to the user once the window has
+        # painted. Done via after() so the messagebox doesn't block the
+        # window from becoming visible first.
+        if self._settings_load_error:
+            self.root.after(500, lambda: messagebox.showwarning(
+                "SelectAndRead — settings", self._settings_load_error,
+                parent=self.root))
         threading.Thread(
             target=_load_models,
             args=(
@@ -652,16 +662,22 @@ class App:
             return
         self._apply_highlight_color(chosen[1])
 
-    def _register_hotkey(self):
+    def _register_hotkey(self) -> bool:
+        """Install the global hotkeys. Records which (if any) failed in
+        self._hotkey_register_error so the UI can surface it. Returns True
+        if both registered cleanly."""
+        failed = []
         try:
             keyboard.add_hotkey(self._hotkey_trigger, self._trigger)
         except Exception:
-            pass
+            failed.append(self._hotkey_trigger)
         try:
             keyboard.add_hotkey(self._hotkey_pause,
                                 lambda: self.root.after(0, self._on_play_btn))
         except Exception:
-            pass
+            failed.append(self._hotkey_pause)
+        self._hotkey_register_error = failed or None
+        return not failed
 
     def _reregister_hotkeys(self):
         try:
@@ -670,22 +686,73 @@ class App:
             pass
         self._register_hotkey()
 
-    def _hotkey_watchdog(self):
-        """Periodically re-install the global hotkeys. Windows can silently
-        drop low-level keyboard hooks after long idle, session changes,
-        screen-lock, or if a callback ever overran the LowLevelHooksTimeout.
-        Re-registering every 30 s makes the app self-heal within that window
-        without the user noticing."""
+    def _hotkey_listener_alive(self) -> bool:
+        """Best-effort probe of the keyboard library's listener thread.
+        Different versions expose different attrs; if we can't tell, return
+        True so the caller leaves the hooks alone."""
         try:
-            self._reregister_hotkeys()
+            listener = getattr(keyboard, "_listener", None)
+            if listener is None:
+                return False
+            listening = getattr(listener, "listening", None)
+            if listening is not None:
+                return bool(listening)
+            is_alive = getattr(listener, "is_alive", None)
+            if callable(is_alive):
+                return bool(is_alive())
         except Exception:
             pass
+        return True
+
+    def _hotkey_watchdog(self):
+        """Self-heal global hotkeys. Windows can silently drop low-level
+        keyboard hooks after long idle, session changes, screen-lock, or if
+        a callback ever overran the LowLevelHooksTimeout.
+
+        Strategy:
+          - tick every 30 s
+          - re-register immediately if the listener thread is clearly dead
+          - re-register unconditionally every 5 min as a safety net against
+            silent drops the listener doesn't notice
+        This avoids the gap caused by unhook+rehook every 30 s while still
+        recovering from Windows' silent-drop case."""
+        self._watchdog_tick = getattr(self, "_watchdog_tick", 0) + 1
+        alive = self._hotkey_listener_alive()
+        if (not alive) or (self._watchdog_tick % 10 == 0):
+            try:
+                self._reregister_hotkeys()
+            except Exception:
+                pass
         self.root.after(30_000, self._hotkey_watchdog)
 
     def _load_settings(self):
         try:
-            with open(_SETTINGS_PATH) as f:
+            f = open(_SETTINGS_PATH)
+        except FileNotFoundError:
+            return
+        except OSError as exc:
+            self._settings_load_error = (
+                f"Could not open settings file:\n{_SETTINGS_PATH}\n\n"
+                f"{exc.__class__.__name__}: {exc}\n\nDefaults will be used.")
+            return
+        try:
+            with f:
                 d = json.load(f)
+        except (json.JSONDecodeError, ValueError) as exc:
+            backup = _SETTINGS_PATH + ".broken"
+            saved_to = None
+            try:
+                os.replace(_SETTINGS_PATH, backup)
+                saved_to = backup
+            except Exception:
+                pass
+            tail = (f"\n\nThe broken file was renamed to:\n{saved_to}"
+                    if saved_to else "")
+            self._settings_load_error = (
+                f"Settings file was corrupt ({exc.__class__.__name__}) and "
+                f"could not be loaded — defaults restored.{tail}")
+            return
+        try:
             self._hotkey_trigger = d.get("hotkey_trigger", self._hotkey_trigger)
             self._hotkey_pause   = d.get("hotkey_pause",   self._hotkey_pause)
             self._voice_id       = d.get("voice",          self._voice_id)
@@ -694,24 +761,38 @@ class App:
             self._text_view_var.set(bool(d.get("text_view", False)))
             self._speed_var.set(float(d.get("speed", 1.0)))
             self._gpu_var.set(bool(d.get("gpu", False)))
-        except Exception:
-            pass
+        except Exception as exc:
+            self._settings_load_error = (
+                f"Settings file had unexpected values "
+                f"({exc.__class__.__name__}: {exc}) — defaults used where needed.")
 
     def _save_settings(self):
+        # Atomic write: serialize fully to a tmp file in the same directory,
+        # then os.replace() onto the real path. This guarantees that a crash
+        # or power-loss mid-write can never leave a half-written settings
+        # file (which json.load would reject on next launch, silently wiping
+        # the user's voice / hotkeys / highlight color).
+        payload = {
+            "hotkey_trigger":  self._hotkey_trigger,
+            "hotkey_pause":    self._hotkey_pause,
+            "voice":           self._voice_id,
+            "highlight_color": self._highlight_color,
+            "highlight_mode":  self._highlight_mode.get(),
+            "text_view":       bool(self._text_view_var.get()),
+            "speed":           round(self._speed_var.get(), 2),
+            "gpu":             bool(self._gpu_var.get()),
+        }
+        tmp = _SETTINGS_PATH + ".tmp"
         try:
-            with open(_SETTINGS_PATH, "w") as f:
-                json.dump({
-                    "hotkey_trigger":  self._hotkey_trigger,
-                    "hotkey_pause":    self._hotkey_pause,
-                    "voice":           self._voice_id,
-                    "highlight_color": self._highlight_color,
-                    "highlight_mode":  self._highlight_mode.get(),
-                    "text_view":       bool(self._text_view_var.get()),
-                    "speed":           round(self._speed_var.get(), 2),
-                    "gpu":             bool(self._gpu_var.get()),
-                }, f, indent=2)
+            with open(tmp, "w") as f:
+                json.dump(payload, f, indent=2)
+                f.flush()
+                try: os.fsync(f.fileno())
+                except OSError: pass
+            os.replace(tmp, _SETTINGS_PATH)
         except Exception:
-            pass
+            try: os.remove(tmp)
+            except OSError: pass
 
     def _open_settings(self):
         dlg = tk.Toplevel(self.root)
@@ -825,8 +906,13 @@ class App:
         cap.protocol("WM_DELETE_WINDOW", lambda: _cleanup())
 
     def _on_models_ready(self):
-        self.root.after(0, lambda: self.status_var.set(
-            f"Ready  ({self._hotkey_trigger.upper()})"))
+        if self._hotkey_register_error:
+            bad = "/".join(self._hotkey_register_error)
+            msg = (f"Ready — but hotkey '{bad}' is unavailable "
+                   "(another app may have claimed it; change it in Settings)")
+        else:
+            msg = f"Ready  ({self._hotkey_trigger.upper()})"
+        self.root.after(0, lambda m=msg: self.status_var.set(m))
 
     def _on_gpu_toggle(self):
         self._save_settings()
@@ -1005,6 +1091,13 @@ class App:
         self.root.after(0, lambda: self.status_var.set(
             "Stopped — Shift+Z to read again"))
 
+    def _abort_generation(self, message: str):
+        """Return to idle when the pipeline aborts before any audio is
+        produced (empty OCR, empty text, error). Without this, _play_state
+        would stay 'generating' forever and Shift+Z would silently no-op."""
+        self._play_state = "idle"
+        self.status_var.set(message)
+
     # ── Generation ────────────────────────────────────────────────────────────
 
     def _generate(self, *, region=None, image=None, text=None):
@@ -1012,12 +1105,12 @@ class App:
             if text is not None:
                 tokens = [t for t in text.split() if t]
                 if not tokens:
-                    self.root.after(0, lambda: self.status_var.set("No text to read"))
+                    self.root.after(0, self._abort_generation, "No text to read")
                     return
                 tts_text = _tts_safe(tokens)
                 ocr_words = [w for w in tokens if any(c.isalnum() for c in w)]
                 if not ocr_words:
-                    self.root.after(0, lambda: self.status_var.set("No readable text"))
+                    self.root.after(0, self._abort_generation, "No readable text")
                     return
                 pil_img, disp_bboxes = _make_text_image(ocr_words)
             else:
@@ -1032,7 +1125,7 @@ class App:
                              for w, b in word_data]
 
                 if not word_data:
-                    self.root.after(0, lambda: self.status_var.set("No text detected"))
+                    self.root.after(0, self._abort_generation, "No text detected")
                     return
 
                 # TTS text: all tokens (punctuation attached to preceding words by
@@ -1168,7 +1261,14 @@ class App:
             self.root.after(0, lambda: self._set_play_state("ready"))
 
         except Exception as exc:
-            self.root.after(0, lambda e=exc: self.status_var.set(f"Error: {e}"))
+            # Keep the raw exception out of the status line — show a short
+            # friendly message; the full traceback is printed for debug.bat.
+            import traceback
+            traceback.print_exc()
+            short = f"{exc.__class__.__name__}: {exc}"
+            if len(short) > 80:
+                short = short[:77] + "…"
+            self.root.after(0, self._abort_generation, f"Error — {short}")
 
     # ── Playback ──────────────────────────────────────────────────────────────
 
