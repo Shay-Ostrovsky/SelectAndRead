@@ -4,7 +4,7 @@
 
 ### Drag a box on your screen — or paste from your clipboard. Hear it read aloud, with each word highlighted as it's spoken.
 
-A desktop OCR + neural-TTS pipeline with synchronized word highlighting, frame-accurate scrubbing, perceptually-optimized auto-highlight colors, audio export, and proper Windows taskbar integration. Pure Python, runs locally, no cloud.
+A desktop OCR + neural-TTS pipeline with synchronized word highlighting, frame-accurate scrubbing, perceptually-optimized highlight colors, WAV export, and proper Windows taskbar integration. Pure Python, runs 100% locally, no cloud.
 
 [![Python](https://img.shields.io/badge/python-3.10--3.12-3776AB?logo=python&logoColor=white)](https://python.org)
 [![PyTorch](https://img.shields.io/badge/PyTorch-EE4C2C?logo=pytorch&logoColor=white)](https://pytorch.org)
@@ -13,6 +13,8 @@ A desktop OCR + neural-TTS pipeline with synchronized word highlighting, frame-a
 [![Platform](https://img.shields.io/badge/platform-Windows-0078D6?logo=windows&logoColor=white)](#)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](#license)
 [![CUDA](https://img.shields.io/badge/CUDA-optional-76B900?logo=nvidia&logoColor=white)](#)
+
+**[Quick Start](#quick-start) · [Features](#features) · [How It Works](#how-it-works) · [Troubleshooting](#troubleshooting)**
 
 </div>
 
@@ -55,17 +57,18 @@ The reader gives you a full timeline scrubber, ±5s skip, 0.5×–2.0× speed, p
 
 ---
 
-## Installation
+## Quick Start
 
-1. Install **Python 3.12** from [python.org](https://python.org) — tick **"Add Python to PATH"** during install
-   > ⚠️ Python 3.13+ is not supported. Use Python 3.10, 3.11, or 3.12.
-2. Download this repo — click **Code → Download ZIP** on GitHub, extract it anywhere
-3. Double-click **`setup.bat`**
-   - It will ask: **"Use GPU? (Y/N)"** — if you have an NVIDIA GPU say Y, otherwise N
-   - It installs all packages and downloads the AI models (~400 MB, takes a few minutes)
-4. Double-click **`run.bat`** or **`SelectAndRead.exe`** to launch 
-   
-5. Desktop shortcut:** double-click **`create_shortcut.bat`** to add a SelectAndRead shortcut to your Desktop.
+1. **Install Python 3.10, 3.11, or 3.12** from [python.org](https://python.org) — make sure to tick **"Add Python to PATH"** during install.
+   > ⚠️ Python 3.13+ is not supported yet.
+2. **Download this repo** — click **Code → Download ZIP** on GitHub, extract it anywhere.
+3. **Double-click `setup.bat`**.
+   - It will ask **"Use GPU? (Y/N)"** — answer **Y** only if you have an NVIDIA GPU. The GPU option accelerates **TTS only**; OCR always runs on the CPU.
+   - It installs all packages and downloads the AI models (~400 MB, a few minutes).
+4. **Launch the app** by double-clicking `SelectAndRead.exe` (or `run.bat` as a fallback).
+5. **(Optional) Desktop shortcut** — double-click `create_shortcut.bat` to create a pinnable Desktop / taskbar shortcut.
+
+That's it. Press **`Shift+Z`** anywhere on your desktop and drag a box.
 
 ---
 
@@ -93,6 +96,15 @@ The reader gives you a full timeline scrubber, ±5s skip, 0.5×–2.0× speed, p
 - **24 English voices** — American/British, male/female (Kokoro voice pack)
 - **WAV export** — 16-bit, 24 kHz, ready for podcast feeds or Audacity
 - **GPU acceleration** for the TTS model (toggle from the UI, requires CUDA)
+
+<details>
+<summary><b>Full voice list (click to expand)</b></summary>
+
+| American Female | American Male | British Female | British Male |
+|---|---|---|---|
+| Heart, Sky, Bella, Nova, River, Sarah, Nicole, Aoede, Kore, Jessica | Michael, Adam, Echo, Eric, Liam, Onyx, Puck | Emma, Isabella, Alice, Lily | George, Lewis, Daniel |
+
+</details>
 
 ### Native Windows integration
 - **Real `.exe` launcher** built from `_launcher.cs` during setup — proper taskbar icon, no console window, animated splash while models warm up
@@ -125,7 +137,8 @@ flowchart LR
     H --> I
     I --> J[Word<br/>Schedule]
     G --> K[Audio<br/>Buffer]
-    J & K --> L[Reader UI<br/>tkinter Canvas]
+    J --> L[Reader UI<br/>tkinter Canvas]
+    K --> L
     L --> M[Synchronized<br/>Playback]
 
     style G fill:#FF6B6B,color:#fff
@@ -220,9 +233,66 @@ The two **global** hotkeys are remappable from the **⚙ Settings** dialog with 
 
 ---
 
+## Troubleshooting
+
+<details>
+<summary><b>"Python not found" / "ERROR: Python … is not supported"</b></summary>
+
+Install Python **3.10, 3.11, or 3.12** from [python.org](https://python.org) and tick **"Add Python to PATH"** during install. Python 3.13+ is not yet supported (Kokoro's deps lag behind). After installing, close the terminal and run `setup.bat` again.
+
+</details>
+
+<details>
+<summary><b>"Hotkey '…' is unavailable" in the status bar</b></summary>
+
+Another running app has already claimed `Shift+Z` (or whichever combo). Open **⚙ Settings**, click **Change** next to the hotkey, and bind a different one. Common offenders: screenshot tools, screen-recording overlays, gaming launchers.
+
+</details>
+
+<details>
+<summary><b>The Shift+Z hotkey stops working after the app has been open for a while</b></summary>
+
+Windows can silently drop low-level keyboard hooks (LowLevelHooksTimeout, screen-lock, fast-user-switch). The app self-heals: a watchdog probes the hook every 30 s and re-registers it when it looks dead, plus a forced refresh every 5 min as a safety net. You shouldn't need to do anything, but if you ever notice a longer outage, click anywhere on the **SelectAndRead** window — the next watchdog tick will fix it.
+
+</details>
+
+<details>
+<summary><b>"Settings file was corrupt" popup on launch</b></summary>
+
+The settings file (`~/.tts_reader.json`) was unreadable — usually after a power-loss or crash mid-save. The app automatically renamed the broken file to `~/.tts_reader.json.broken` so you can inspect it, then reset to defaults. Just reconfigure your voice/highlight and the file will be re-created cleanly (with atomic writes, so this shouldn't recur).
+
+</details>
+
+<details>
+<summary><b>GPU mode crashes / "WinError 126" / "c10_cuda.dll not found"</b></summary>
+
+You picked **Y** for GPU during `setup.bat`, but your machine doesn't have a working CUDA installation. Re-run `setup.bat` and pick **N** (CPU). CPU is plenty fast for the TTS model on any modern desktop. (OCR always runs on CPU regardless of this choice.)
+
+</details>
+
+<details>
+<summary><b>OCR returned no text / "No text detected"</b></summary>
+
+PaddleOCR works best on clean, dark-on-light printed text. Tips:
+- Drag a tighter box around just the text — large regions with lots of background can confuse detection.
+- If the text is very small or low-contrast, zoom in first (browser zoom, PDF zoom) and re-drag.
+- For images that already are screenshots, use **Ctrl+V** (paste image) — same pipeline, but easier to retry.
+- For tiny GIFs/icons with stylised fonts, OCR will simply fail — copy the text manually and paste it with **Ctrl+V** to skip OCR entirely.
+
+</details>
+
+<details>
+<summary><b>Want to see the full error / Python traceback</b></summary>
+
+Run `debug.bat` instead of `run.bat` — it launches the app in a console window so you can see stack traces from OCR / TTS errors. Useful when reporting an issue.
+
+</details>
+
+---
+
 ## License
 
-[MIT](LICENSE) — do whatever you want, attribution appreciated.
+**MIT** — do whatever you want, attribution appreciated.
 
 ---
 
