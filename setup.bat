@@ -63,7 +63,11 @@ python -m pip install --upgrade pip --quiet
 
 echo.
 echo Do you have an NVIDIA GPU and want faster processing?
-echo (If unsure, choose N -- the app works fine on CPU)
+echo This installs CUDA-enabled wheels for BOTH speech (PyTorch with CUDA
+echo 12.1) and OCR (onnxruntime-gpu). Either model can still be toggled
+echo CPU/GPU later in the app -- this just decides whether the GPU option
+echo is available at all.
+echo (If unsure, choose N -- the app works fine on CPU.)
 echo.
 set /p GPU_CHOICE="Use GPU? (Y/N): "
 
@@ -81,6 +85,7 @@ if errorlevel 1 (
     echo WARNING: CUDA install failed. Falling back to CPU version.
     echo Make sure your NVIDIA drivers are up to date, or choose N next time.
     echo.
+    set GPU_CHOICE=N
     goto install_cpu
 )
 goto install_deps
@@ -106,6 +111,21 @@ if errorlevel 1 (
     echo ERROR: Dependency installation failed.
     pause
     exit /b 1
+)
+
+if /i "%GPU_CHOICE%"=="Y" (
+    echo.
+    echo Swapping onnxruntime CPU for onnxruntime-gpu so OCR can use CUDA...
+    echo (~250 MB from PyPI -- fast.^)
+    pip uninstall -y onnxruntime onnxruntime-gpu >nul
+    pip install onnxruntime-gpu
+    if errorlevel 1 (
+        echo.
+        echo WARNING: onnxruntime-gpu install failed -- OCR will run on CPU.
+        echo Make sure your NVIDIA drivers are up to date, or choose N next time.
+        echo Reinstalling the CPU runtime so the app still works...
+        pip install onnxruntime >nul
+    )
 )
 
 echo.
@@ -151,7 +171,7 @@ echo  Setup complete!
 echo.
 if /i "%GPU_CHOICE%"=="Y" (
     echo  GPU mode installed. Enable it in the app
-    echo  using the "Use GPU" checkbox.
+    echo  using the "Use GPU - TTS" / "Use GPU - OCR" checkboxes.
 ) else (
     echo  CPU mode installed.
 )

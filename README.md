@@ -9,7 +9,7 @@ A desktop OCR + neural-TTS pipeline with synchronized word highlighting, frame-a
 [![Python](https://img.shields.io/badge/python-3.10--3.12-3776AB?logo=python&logoColor=white)](https://python.org)
 [![PyTorch](https://img.shields.io/badge/PyTorch-EE4C2C?logo=pytorch&logoColor=white)](https://pytorch.org)
 [![Kokoro](https://img.shields.io/badge/TTS-Kokoro--82M-FF6B6B)](https://huggingface.co/hexgrad/Kokoro-82M)
-[![PaddleOCR](https://img.shields.io/badge/OCR-PP--OCRv5%20mobile-1E88E5)](https://github.com/PaddlePaddle/PaddleOCR)
+[![RapidOCR](https://img.shields.io/badge/OCR-RapidOCR%20%2B%20PP--OCRv5-1E88E5)](https://github.com/RapidAI/RapidOCR)
 [![Platform](https://img.shields.io/badge/platform-Windows-0078D6?logo=windows&logoColor=white)](#)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](#license)
 [![CUDA](https://img.shields.io/badge/CUDA-optional-76B900?logo=nvidia&logoColor=white)](#)
@@ -41,7 +41,7 @@ Everything runs **100% locally**. No accounts, no API keys, no text leaves your 
 ```
 1.  Press the global hotkey                from anywhere on the desktop
 2.  Drag a rectangle                       across the region you want read
-3.  PaddleOCR (PP-OCRv5 mobile EN) reads   the text + bounding boxes
+3.  RapidOCR (PP-OCRv5 mobile EN ONNX)     reads the text + bounding boxes
 4.  Kokoro-82M generates speech            with word-level timestamps
 5.  A reader window opens                  highlighting each word as it's spoken
 ```
@@ -63,7 +63,7 @@ The reader gives you a full timeline scrubber, ±5s skip, 0.5×–2.0× speed, p
    > ⚠️ Python 3.13+ is not supported yet.
 2. **Download this repo** — click **Code → Download ZIP** on GitHub, extract it anywhere.
 3. **Double-click `setup.bat`**.
-   - It will ask **"Use GPU? (Y/N)"** — answer **Y** only if you have an NVIDIA GPU. The GPU option accelerates **TTS only**; OCR always runs on the CPU.
+   - It will ask **"Use GPU? (Y/N)"** — answer **Y** only if you have an NVIDIA GPU. With **Y**, the installer adds CUDA-enabled wheels for **both** TTS (PyTorch CUDA 12.1) and OCR (`onnxruntime-gpu`); each can still be individually toggled CPU / GPU later from the app's checkboxes.
    - It installs all packages and downloads the AI models (~400 MB, a few minutes).
 4. **Launch the app** by double-clicking `SelectAndRead.exe` (or `run.bat` as a fallback).
 5. **(Optional) Desktop shortcut** — double-click `create_shortcut.bat` to create a pinnable Desktop / taskbar shortcut.
@@ -77,7 +77,7 @@ That's it. Press **`Shift+Z`** anywhere on your desktop and drag a box.
 ### Input methods
 - **Drag a screen region** with the global hotkey (works on PDFs, videos, photos, anything visible)
 - **Paste from clipboard** — `Ctrl+V` reads either an image (full OCR pipeline) or text (OCR is skipped entirely)
-- **PaddleOCR (PP-OCRv5 mobile EN)** — small, fast, high-accuracy deep-learning OCR. Mobile-variant models total under ~20 MB and run on CPU comfortably.
+- **RapidOCR with PP-OCRv5 mobile EN ONNX weights** — the same model weights as PaddleOCR's PP-OCRv5 mobile EN, executed by ONNX Runtime instead of PaddlePaddle. Identical OCR output, ~10× lighter install (~250 MB instead of ~2.5 GB of CUDA wheels). GPU acceleration via `onnxruntime-gpu` is a single small package.
 
 ### Reading experience
 - **Word-by-word highlighting** synchronized to audio via Kokoro's per-token timestamps
@@ -95,7 +95,7 @@ That's it. Press **`Shift+Z`** anywhere on your desktop and drag a box.
 ### Voices and audio
 - **24 English voices** — American/British, male/female (Kokoro voice pack)
 - **WAV export** — 16-bit, 24 kHz, ready for podcast feeds or Audacity
-- **GPU acceleration** for the TTS model (toggle from the UI, requires CUDA)
+- **Independent GPU toggles** for TTS and OCR (each can run on CPU or GPU — toggle from the UI, requires CUDA)
 
 <details>
 <summary><b>Full voice list (click to expand)</b></summary>
@@ -127,7 +127,7 @@ flowchart LR
     B --> C[Screenshot<br/>PIL ImageGrab]
     P -- image --> C
     P -- text --> F
-    C --> D[PaddleOCR<br/>PP-OCRv5 mobile EN<br/>line text + bboxes]
+    C --> D[RapidOCR<br/>PP-OCRv5 mobile EN ONNX<br/>line text + polygons]
     D --> SP[Proportional<br/>Line→Word Split]
     SP --> E2[BBox<br/>Tightener]
     E2 --> F[Sanitized<br/>Token Stream]
@@ -153,8 +153,8 @@ The core insight is that **OCR words and TTS words don't always align 1:1** — 
 
 ## Under the Hood
 
-**PaddleOCR PP-OCRv5 mobile**
-Recognition uses PaddleOCR's PP-OCRv5 *mobile* English models — the lightweight (~20 MB total) variant of the v5 release. Detection produces axis-aligned line bboxes; recognition reads each line. The `_paddle_ocr` helper wraps `PaddleOCR.predict()` and returns per-word entries by splitting each line bbox proportionally by character count.
+**PP-OCRv5 mobile EN via RapidOCR + ONNX Runtime**
+Recognition uses **PaddleOCR's PP-OCRv5 mobile English weights**, exported to ONNX format and executed by `rapidocr-onnxruntime`. Identical model bytes to a PaddleOCR install — same OCR output character-for-character — but the runtime is **onnxruntime** (a ~250 MB package) instead of the **PaddlePaddle** stack (~2.5 GB of CUDA wheels from a slow CDN). The three ONNX files (det + rec + cls, ~20 MB total) are downloaded by `_download_models.py` from RapidAI's ModelScope mirror with SHA-256 verification, then cached under `~/.cache/SelectAndRead/onnx/`. The `_ocr` helper collapses each line's 4-point polygon to its axis-aligned rect and splits each line into per-word boxes proportionally by character count. GPU acceleration is opt-in via `onnxruntime-gpu` (installed by setup.bat if you answer **Y**), toggled separately from TTS-GPU in the UI.
 
 **Per-pixel bounding box tightening**
 After the proportional word split, each bbox is shrunk to the columns that actually contain ink by analyzing per-column pixel brightness variance — so highlights cover only the word, never the trailing space.
@@ -184,8 +184,8 @@ The splash polls for `%TEMP%\SelectAndRead.ready`, which `main.py` writes via `r
 | Layer | Library | What it does here |
 |---|---|---|
 | **Neural TTS** | [Kokoro-82M](https://huggingface.co/hexgrad/Kokoro-82M) | 82M-parameter open-weights TTS model with per-token timestamps |
-| **OCR** | [PaddleOCR](https://github.com/PaddlePaddle/PaddleOCR) (PP-OCRv5 mobile EN) | Lightweight high-accuracy OCR — runs on [PaddlePaddle](https://www.paddlepaddle.org.cn/), CPU-friendly |
-| **Inference runtime** | [PyTorch](https://pytorch.org) | GPU/CPU backend for both OCR and TTS models |
+| **OCR** | [RapidOCR](https://github.com/RapidAI/RapidOCR) + PP-OCRv5 mobile EN ONNX | The PP-OCRv5 mobile English weights from PaddleOCR, exported to ONNX and run via onnxruntime — same accuracy, ~10× lighter install |
+| **Inference runtimes** | [PyTorch](https://pytorch.org) (TTS) + [ONNX Runtime](https://onnxruntime.ai) (OCR) | GPU/CPU backends — each can be toggled independently in the UI |
 | **Image processing** | [Pillow (PIL)](https://python-pillow.org) | Screenshot capture, alpha-composited highlight overlays, font rendering |
 | **Audio playback** | [sounddevice](https://python-sounddevice.readthedocs.io) | Low-latency PortAudio bindings, samplerate-based speed control |
 | **Hotkeys** | [keyboard](https://github.com/boppreh/keyboard) | System-wide hotkey hooks and live capture for the settings dialog |
@@ -264,16 +264,20 @@ The settings file (`~/.tts_reader.json`) was unreadable — usually after a powe
 </details>
 
 <details>
-<summary><b>GPU mode crashes / "WinError 126" / "c10_cuda.dll not found"</b></summary>
+<summary><b>GPU mode crashes / "WinError 126" / "c10_cuda.dll not found" / OCR-GPU silently uses CPU</b></summary>
 
-You picked **Y** for GPU during `setup.bat`, but your machine doesn't have a working CUDA installation. Re-run `setup.bat` and pick **N** (CPU). CPU is plenty fast for the TTS model on any modern desktop. (OCR always runs on CPU regardless of this choice.)
+You picked **Y** for GPU during `setup.bat`, but your machine's CUDA stack isn't fully in place. Either:
+- Re-run `setup.bat` and pick **N** (CPU). CPU is plenty fast for both models on any modern desktop, or
+- Update your NVIDIA driver (R525+ for CUDA 12.x) and re-run `setup.bat` with **Y**.
+
+If only OCR-GPU silently fell back to CPU, it's usually that `onnxruntime-gpu` wasn't installed (or couldn't load its CUDA providers) — the app probes `onnxruntime.get_available_providers()` at model-load time and reverts to CPU execution automatically so the OCR still works.
 
 </details>
 
 <details>
 <summary><b>OCR returned no text / "No text detected"</b></summary>
 
-PaddleOCR works best on clean, dark-on-light printed text. Tips:
+The PP-OCRv5 mobile EN model works best on clean, dark-on-light printed text. Tips:
 - Drag a tighter box around just the text — large regions with lots of background can confuse detection.
 - If the text is very small or low-contrast, zoom in first (browser zoom, PDF zoom) and re-drag.
 - For images that already are screenshots, use **Ctrl+V** (paste image) — same pipeline, but easier to retry.
@@ -299,5 +303,6 @@ Run `debug.bat` instead of `run.bat` — it launches the app in a console window
 ## Acknowledgments
 
 - **[Kokoro-82M](https://huggingface.co/hexgrad/Kokoro-82M)** by hexgrad — remarkable TTS quality at this parameter count
-- **[PaddleOCR](https://github.com/PaddlePaddle/PaddleOCR)** by the PaddlePaddle team — PP-OCRv5 mobile models, excellent accuracy at small size
+- **[RapidOCR](https://github.com/RapidAI/RapidOCR)** by RapidAI — onnxruntime wrapper plus model registry, and the ONNX exports of the PP-OCRv5 weights we use
+- **[PaddleOCR](https://github.com/PaddlePaddle/PaddleOCR)** by the PaddlePaddle team — original PP-OCRv5 mobile model design + training
 - WCAG color-contrast formulas from the W3C Accessibility Guidelines

@@ -10,7 +10,7 @@ import wave
 from tkinter import ttk, colorchooser, filedialog, messagebox
 
 import numpy as np
-from paddleocr import PaddleOCR
+from rapidocr_onnxruntime import RapidOCR
 import sounddevice as sd
 import torch
 try:
@@ -71,40 +71,81 @@ VOICES = [
     ("bm_daniel",  "Daniel (BM)"),
 ]
 
-_ocr_reader: PaddleOCR | None = None
+_ocr_reader: RapidOCR | None = None
 _tts_pipeline: KPipeline | None = None
 
+# Where _download_models.py writes the PP-OCRv5 mobile EN ONNX files.
+# Same model weights as PaddleOCR's PP-OCRv5 mobile EN — just exported to
+# ONNX so they can run through onnxruntime instead of the 2+ GB PaddlePaddle
+# stack. Identical OCR output, ~10× lighter install.
+_OCR_MODEL_DIR = os.path.join(
+    os.path.expanduser("~"), ".cache", "SelectAndRead", "onnx")
+_OCR_DET_PATH = os.path.join(_OCR_MODEL_DIR, "ch_PP-OCRv5_det_mobile.onnx")
+_OCR_REC_PATH = os.path.join(_OCR_MODEL_DIR, "en_PP-OCRv5_rec_mobile.onnx")
+# Note: no cls model. We pass use_cls=False at call time. The PP-OCRv5 cls
+# model has a different input shape ([3,80,160]) than rapidocr-onnxruntime's
+# preprocessor expects ([3,48,192]), and orientation classification is
+# pointless for screen text anyway (it's always upright).
 
-def _paddle_ocr(img_array: np.ndarray) -> list[tuple[str, tuple]]:
-    """Run PaddleOCR (PP-OCRv5 mobile EN) on a numpy image array.
+
+def _ocr(img_array: np.ndarray) -> list[tuple[str, tuple]]:
+    """Run RapidOCR with PP-OCRv5 mobile EN ONNX weights on an image array.
     Returns [(word, (x1, y1, x2, y2)), ...] in image pixel coords.
 
-    PaddleOCR's recognition is line-level, so each line bbox is split into
-    word bboxes proportionally by character count. _tighten_x_bbox later
-    snaps each word bbox to its actual ink columns.
+    RapidOCR returns line-level entries with 4-point polygons; we collapse
+    each polygon to its axis-aligned bounding rect, then split the line
+    into per-word boxes proportionally by character count. _tighten_x_bbox
+    later snaps each word bbox to its actual ink columns.
     """
+    global _ocr_reader
     if _ocr_reader is None:
         return []
-    result = _ocr_reader.predict(img_array)
+    # RapidOCR.__call__ returns (result, elapse). result is either a list of
+    # [polygon, text, score] entries, or None if nothing was detected.
+    # use_cls=False skips the text-orientation classifier (screen text is
+    # always upright; also avoids a shape mismatch with the v5 cls model).
+    try:
+        result, _elapse = _ocr_reader(img_array, use_cls=False)
+    except Exception as exc:
+        # ONNX Runtime CUDA inference can fail at runtime even when our
+        # provider check passed at model-load time (driver / cuDNN / CUDA
+        # ABI mismatches only surface on the first real GPU call). Rebuild
+        # the engine on CPU and retry once so the user keeps working.
+        import traceback
+        traceback.print_exc()
+        print(f"OCR inference failed ({exc.__class__.__name__}); "
+              f"rebuilding on CPU and retrying.")
+        try:
+            _ocr_reader = RapidOCR(
+                det_model_path=_OCR_DET_PATH,
+                rec_model_path=_OCR_REC_PATH,
+                det_use_cuda=False,
+                rec_use_cuda=False,
+            )
+            result, _elapse = _ocr_reader(img_array, use_cls=False)
+        except Exception:
+            traceback.print_exc()
+            return []
     if not result:
         return []
-    res = result[0]
-
-    texts: list[str] = list(res.get("rec_texts", []) or [])
-    boxes_raw       = res.get("rec_boxes", None)
-    if boxes_raw is None or len(texts) == 0:
-        return []
-    boxes = boxes_raw.tolist() if hasattr(boxes_raw, "tolist") else list(boxes_raw)
 
     out: list[tuple[str, tuple]] = []
-    for line_text, box in zip(texts, boxes):
-        if not line_text or not line_text.strip():
+    for entry in result:
+        if entry is None:
             continue
         try:
-            x1, y1, x2, y2 = int(box[0]), int(box[1]), int(box[2]), int(box[3])
+            poly, line_text, _score = entry[0], entry[1], entry[2]
+        except (TypeError, IndexError):
+            continue
+        if not line_text or not str(line_text).strip():
+            continue
+        try:
+            pts = np.asarray(poly, dtype=float).reshape(-1, 2)
+            x1, y1 = int(pts[:, 0].min()), int(pts[:, 1].min())
+            x2, y2 = int(pts[:, 0].max()), int(pts[:, 1].max())
         except (TypeError, ValueError, IndexError):
             continue
-        words = line_text.strip().split()
+        words = str(line_text).strip().split()
         if not words:
             continue
         if len(words) == 1:
@@ -125,28 +166,42 @@ def _paddle_ocr(img_array: np.ndarray) -> list[tuple[str, tuple]]:
 
 
 def _load_models(on_status: callable, on_done: callable, on_error: callable,
-                 gpu: bool = False) -> None:
+                 gpu_tts: bool = False, gpu_ocr: bool = False) -> None:
     global _ocr_reader, _tts_pipeline
     try:
-        use_cuda = gpu and torch.cuda.is_available()
-        device   = "cuda" if use_cuda else "cpu"
+        # Speech device: only "cuda" if both requested AND torch.cuda exists.
+        tts_device = "cuda" if (gpu_tts and torch.cuda.is_available()) else "cpu"
+
+        # OCR CUDA: only enabled if the user ticked GPU-OCR AND the installed
+        # onnxruntime build exposes CUDAExecutionProvider (i.e. onnxruntime-gpu
+        # is on the venv, not the CPU runtime). Otherwise fall back silently.
+        ocr_use_cuda = False
+        if gpu_ocr:
+            try:
+                import onnxruntime as _ort
+                ocr_use_cuda = (
+                    "CUDAExecutionProvider" in _ort.get_available_providers())
+            except Exception:
+                ocr_use_cuda = False
+
         on_status("Loading OCR model (PP-OCRv5 mobile)…")
-        # enable_mkldnn=False avoids a PaddlePaddle PIR+OneDNN crash
-        # ("ConvertPirAttribute2RuntimeAttribute not support
-        # [pir::ArrayAttribute<pir::DoubleAttribute>]") that fires on some
-        # CPUs when the OneDNN instruction set is used during inference.
-        _ocr_reader = PaddleOCR(
-            text_detection_model_name="PP-OCRv5_mobile_det",
-            text_recognition_model_name="PP-OCRv5_mobile_rec",
-            use_doc_orientation_classify=False,
-            use_doc_unwarping=False,
-            use_textline_orientation=False,
-            enable_mkldnn=False,
-            lang="en",
+        # Pin RapidOCR to the PP-OCRv5 mobile EN ONNX weights downloaded
+        # by _download_models.py — identical bytes to the v5 weights used
+        # by PaddleOCR, so OCR output is bit-identical to the previous
+        # paddle install. The use_cuda flags only take effect if the
+        # installed runtime is onnxruntime-gpu; with CPU onnxruntime they
+        # silently fall back to CPU execution. We skip the cls (text
+        # orientation classifier) entirely — screen text is always upright.
+        _ocr_reader = RapidOCR(
+            det_model_path=_OCR_DET_PATH,
+            rec_model_path=_OCR_REC_PATH,
+            det_use_cuda=ocr_use_cuda,
+            rec_use_cuda=ocr_use_cuda,
         )
+
         on_status("Loading speech model…")
         _tts_pipeline = KPipeline(lang_code="a", repo_id="hexgrad/Kokoro-82M",
-                                  device=device)
+                                  device=tts_device)
         on_done()
     except Exception as exc:
         on_error(exc)
@@ -525,7 +580,11 @@ class App:
         self._hotkey_trigger    = "shift+z"
         self._hotkey_pause      = "shift+x"
         self._voice_id          = VOICES[0][0]
-        self._gpu_var           = tk.BooleanVar(value=False)
+        # Two independent GPU toggles. TTS = Kokoro on torch CUDA;
+        # OCR = RapidOCR on onnxruntime-gpu. Either or both may be CUDA;
+        # at runtime each falls back to CPU if its backend is missing.
+        self._gpu_tts_var       = tk.BooleanVar(value=False)
+        self._gpu_ocr_var       = tk.BooleanVar(value=False)
         # Populated by _load_settings / _register_hotkey if anything went
         # wrong; surfaced to the user once the UI is alive.
         self._settings_load_error: str | None = None
@@ -556,7 +615,8 @@ class App:
                 lambda exc: self.root.after(0, lambda e=exc: self.status_var.set(
                     f"Model load failed: {e}")),
             ),
-            kwargs={"gpu": self._gpu_var.get()},
+            kwargs={"gpu_tts": self._gpu_tts_var.get(),
+                    "gpu_ocr": self._gpu_ocr_var.get()},
             daemon=True,
         ).start()
 
@@ -619,9 +679,12 @@ class App:
 
         gf = ttk.Frame(self.root)
         gf.pack(**pad)
-        ttk.Checkbutton(gf, text="Use GPU for speech  (requires CUDA)",
-                        variable=self._gpu_var,
-                        command=self._on_gpu_toggle).pack(side=tk.LEFT)
+        ttk.Checkbutton(gf, text="Use GPU — TTS  (requires CUDA)",
+                        variable=self._gpu_tts_var,
+                        command=self._on_gpu_toggle).pack(anchor="w")
+        ttk.Checkbutton(gf, text="Use GPU — OCR  (requires CUDA)",
+                        variable=self._gpu_ocr_var,
+                        command=self._on_gpu_toggle).pack(anchor="w")
 
         ttk.Button(self.root, text="⚙  Settings",
                    command=self._open_settings, width=28).pack(**pad)
@@ -760,7 +823,11 @@ class App:
             self._highlight_mode.set(d.get("highlight_mode", "auto"))
             self._text_view_var.set(bool(d.get("text_view", False)))
             self._speed_var.set(float(d.get("speed", 1.0)))
-            self._gpu_var.set(bool(d.get("gpu", False)))
+            # Legacy `gpu` flag (single toggle) becomes the default for both
+            # new split toggles when an older settings file is loaded.
+            legacy_gpu = bool(d.get("gpu", False))
+            self._gpu_tts_var.set(bool(d.get("gpu_tts", legacy_gpu)))
+            self._gpu_ocr_var.set(bool(d.get("gpu_ocr", legacy_gpu)))
         except Exception as exc:
             self._settings_load_error = (
                 f"Settings file had unexpected values "
@@ -780,7 +847,8 @@ class App:
             "highlight_mode":  self._highlight_mode.get(),
             "text_view":       bool(self._text_view_var.get()),
             "speed":           round(self._speed_var.get(), 2),
-            "gpu":             bool(self._gpu_var.get()),
+            "gpu_tts":         bool(self._gpu_tts_var.get()),
+            "gpu_ocr":         bool(self._gpu_ocr_var.get()),
         }
         tmp = _SETTINGS_PATH + ".tmp"
         try:
@@ -922,8 +990,10 @@ class App:
         global _ocr_reader, _tts_pipeline
         _ocr_reader = None
         _tts_pipeline = None
-        label = "GPU" if self._gpu_var.get() else "CPU"
-        self.status_var.set(f"Reloading models ({label})…")
+        tts_lbl = "GPU" if self._gpu_tts_var.get() else "CPU"
+        ocr_lbl = "GPU" if self._gpu_ocr_var.get() else "CPU"
+        self.status_var.set(
+            f"Reloading models (TTS {tts_lbl}, OCR {ocr_lbl})…")
         threading.Thread(
             target=_load_models,
             args=(
@@ -932,7 +1002,8 @@ class App:
                 lambda exc: self.root.after(0, lambda e=exc: self.status_var.set(
                     f"Model load failed: {e}")),
             ),
-            kwargs={"gpu": self._gpu_var.get()},
+            kwargs={"gpu_tts": self._gpu_tts_var.get(),
+                    "gpu_ocr": self._gpu_ocr_var.get()},
             daemon=True,
         ).start()
 
@@ -1117,9 +1188,10 @@ class App:
                 if image is None:
                     image = ImageGrab.grab(bbox=region, all_screens=True)
                 img_array = np.array(image)
-                # PaddleOCR returns line-level bboxes; _paddle_ocr splits each
-                # line into per-word boxes proportionally by character count.
-                word_data = _paddle_ocr(img_array)
+                # RapidOCR returns line-level polygons; _ocr collapses them
+                # to axis-aligned rects and splits each line into per-word
+                # boxes proportionally by character count.
+                word_data = _ocr(img_array)
                 # Pixel-tight each bbox so highlights snap to the ink columns.
                 word_data = [(w, _tighten_x_bbox(img_array, *b))
                              for w, b in word_data]
