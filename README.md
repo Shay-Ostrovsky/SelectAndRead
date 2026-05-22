@@ -77,6 +77,7 @@ That's it. Press **`Shift+Z`** anywhere on your desktop and drag a box.
 ### Input methods
 - **Drag a screen region** with the global hotkey (works on PDFs, videos, photos, anything visible)
 - **Paste from clipboard** — `Ctrl+V` reads either an image (full OCR pipeline) or text (OCR is skipped entirely)
+- **Scrolling capture (in-process)** — tick the "Scrolling capture" box in the main panel. The global hotkey then drags a region, sends mouse-wheel events to the window under the cursor, captures the screen after each scroll, and stitches the frames together via template-matched overlap detection. Reads long webpages, multi-page PDFs, anything taller than the screen. No external dependency, no extra install step — pure Python + numpy (+ OpenCV via the OCR stack for fast template matching).
 - **RapidOCR with PP-OCRv5 mobile EN ONNX weights** — the same model weights as PaddleOCR's PP-OCRv5 mobile EN, executed by ONNX Runtime instead of PaddlePaddle. Identical OCR output, ~10× lighter install (~250 MB instead of ~2.5 GB of CUDA wheels). GPU acceleration via `onnxruntime-gpu` is a single small package.
 
 ### Reading experience
@@ -282,6 +283,25 @@ The PP-OCRv5 mobile EN model works best on clean, dark-on-light printed text. Ti
 - If the text is very small or low-contrast, zoom in first (browser zoom, PDF zoom) and re-drag.
 - For images that already are screenshots, use **Ctrl+V** (paste image) — same pipeline, but easier to retry.
 - For tiny GIFs/icons with stylised fonts, OCR will simply fail — copy the text manually and paste it with **Ctrl+V** to skip OCR entirely.
+
+</details>
+
+<details>
+<summary><b>Scrolling capture: how it works + troubleshooting</b></summary>
+
+Tick the **Scrolling capture** checkbox in the main panel. The next time you press `Shift+Z`:
+
+1. **Drag a region** over the content you want to read — same selector as the normal capture flow.
+2. SelectAndRead parks your cursor at the centre of the region, then sends mouse-wheel events while grabbing the screen after each scroll. It stops automatically when the captured area stops changing (i.e. you've hit the bottom).
+3. The frames are stitched together via template-matched overlap detection (OpenCV `matchTemplate` for the fast path, NumPy SSD fallback if OpenCV isn't available).
+4. The stitched image runs through the standard OCR + TTS pipeline.
+
+**Tips and gotchas**:
+
+- **Don't move the mouse during capture**. SelectAndRead re-parks the cursor at the region centre before every wheel event so a brushed touch usually doesn't break anything, but a deliberate move-and-click can.
+- **Works on anything that responds to mouse-wheel scrolling**: browsers, PDF viewers, Word, code editors, settings panes, image viewers. Doesn't work on apps that only scroll via custom keyboard shortcuts (rare).
+- **Sticky headers / floating nav bars** will appear repeatedly in the stitched output. The OCR layer just reads them multiple times; it doesn't hurt the audio, just makes the read longer.
+- **Stop button cancels mid-capture**: clicking Stop sets the same `stop_event` the OCR worker uses, so an in-flight scrolling capture aborts cleanly.
 
 </details>
 

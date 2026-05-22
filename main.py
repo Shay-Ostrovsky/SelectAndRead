@@ -88,6 +88,7 @@ _OCR_REC_PATH = os.path.join(_OCR_MODEL_DIR, "en_PP-OCRv5_rec_mobile.onnx")
 # pointless for screen text anyway (it's always upright).
 
 
+
 def _ocr(img_array: np.ndarray) -> list[tuple[str, tuple]]:
     """Run RapidOCR with PP-OCRv5 mobile EN ONNX weights on an image array.
     Returns [(word, (x1, y1, x2, y2)), ...] in image pixel coords.
@@ -213,6 +214,166 @@ def _virtual_screen() -> tuple[int, int, int, int]:
         u.GetSystemMetrics(76), u.GetSystemMetrics(77),
         u.GetSystemMetrics(78), u.GetSystemMetrics(79),
     )
+
+
+# ── In-process scrolling capture ──────────────────────────────────────────────
+# Capture a vertically-scrolling screenshot of an arbitrary screen region by
+# sending mouse-wheel events to the window under the region's centre and
+# stitching the resulting frames. Drop-in replacement for ShareX's scrolling
+# capture, with the advantage that we know the original region's screen
+# coordinates (so the reader window can align to the same top-left as a
+# normal drag-region capture).
+
+def _find_vertical_overlap(template: np.ndarray,
+                           image: np.ndarray) -> int | None:
+    """Find the y-offset in `image` where `template` best matches. Returns
+    None if no acceptable match is found.
+
+    template: shape (strip_h, w, channels) — bottom strip of the previous
+              stitched result.
+    image:    shape (h, w, channels) — the new frame we're trying to align.
+    """
+    if image.shape[0] < template.shape[0]:
+        return None
+    try:
+        import cv2
+        # TM_SQDIFF_NORMED returns 0.0 for perfect match, 1.0 for worst.
+        res = cv2.matchTemplate(image, template, cv2.TM_SQDIFF_NORMED)
+        min_val, _, min_loc, _ = cv2.minMaxLoc(res)
+        if min_val > 0.20:
+            return None  # match too poor
+        return int(min_loc[1])
+    except Exception:
+        # Numpy fallback (slower but no extra dependency).
+        strip_h = template.shape[0]
+        n = image.shape[0] - strip_h + 1
+        if n <= 0:
+            return None
+        template_i = template.astype(np.int32)
+        best_y, best_diff = -1, None
+        for y in range(n):
+            d = np.sum((image[y:y + strip_h].astype(np.int32) - template_i) ** 2)
+            if best_diff is None or d < best_diff:
+                best_diff = d
+                best_y = y
+        if best_y < 0:
+            return None
+        # Reject very poor matches (heuristic threshold on per-pixel error).
+        per_pixel = best_diff / (strip_h * image.shape[1] * image.shape[2])
+        if per_pixel > 4000:
+            return None
+        return best_y
+
+
+def _stitch_frames(frames: list[np.ndarray]) -> np.ndarray:
+    """Stitch a list of overlapping vertical frames into one tall image.
+    Each frame is appended below the running stitched result, with the
+    overlapping region detected by template-matching the bottom strip of
+    the stitched result against the new frame."""
+    if not frames:
+        return np.zeros((1, 1, 3), dtype=np.uint8)
+    stitched = frames[0]
+    for new_frame in frames[1:]:
+        strip_h = min(80, stitched.shape[0] // 4, new_frame.shape[0] // 2)
+        if strip_h < 10:
+            stitched = np.vstack([stitched, new_frame])
+            continue
+        template = stitched[-strip_h:]
+        y_offset = _find_vertical_overlap(template, new_frame)
+        if y_offset is None:
+            # No reliable match — assume the scroll was a full frame.
+            stitched = np.vstack([stitched, new_frame])
+            continue
+        new_start = y_offset + strip_h
+        if new_start >= new_frame.shape[0]:
+            continue   # this frame added no new rows
+        stitched = np.vstack([stitched, new_frame[new_start:]])
+    return stitched
+
+
+def _capture_scrolling(region: tuple,
+                       stop_event: "threading.Event | None" = None,
+                       status_cb=None,
+                       max_frames: int = 40,
+                       scroll_delta: int = -360,
+                       scroll_delay: float = 0.25) -> Image.Image:
+    """Capture a vertically-scrolling screenshot of `region`. Sends
+    mouse-wheel events to the window under the centre of `region`,
+    captures after each scroll, and stops when the captured content
+    stops changing (or after `max_frames`, whichever comes first).
+
+    Returns the stitched composite as a PIL Image. The image's width
+    equals the region width; its height is at least the region height
+    and may be many times taller for long pages."""
+    u = ctypes.windll.user32
+    x1, y1, x2, y2 = region
+    cx, cy = (x1 + x2) // 2, (y1 + y2) // 2
+
+    # Park the cursor over the region so wheel events go to the right
+    # window (Windows' default is "scroll the window the cursor hovers
+    # over" — Settings → Mouse → "Scroll inactive windows...").
+    u.SetCursorPos(int(cx), int(cy))
+    time.sleep(0.20)   # let any focus / hover state settle
+
+    def _grab() -> np.ndarray:
+        img = ImageGrab.grab(bbox=region, all_screens=True).convert("RGB")
+        return np.array(img)
+
+    frames: list[np.ndarray] = [_grab()]
+    last_frame = frames[0]
+    stall_count = 0
+
+    if status_cb:
+        status_cb("Scrolling capture: frame 1…")
+
+    # Split each scroll step into several smaller wheel events for
+    # *smooth* scrolling. Browsers, PDF viewers, and most modern apps
+    # interpret sub-notch wheel deltas as smooth-scroll input (the same
+    # mechanism trackpads use) — many small events feel like a continuous
+    # scroll, while one big -360 event looks like a discrete jump.
+    SUB_EVENTS = 6
+    sub_delta = scroll_delta // SUB_EVENTS    # e.g. -60 when scroll_delta = -360
+    # Allocate the per-step time budget: 60% on the sub-events themselves,
+    # 40% as a "settle" wait so the page's smooth-scroll animation can
+    # finish before we grab.
+    sub_event_gap = (scroll_delay * 0.60) / SUB_EVENTS
+    settle_time   = scroll_delay * 0.40
+
+    for i in range(max_frames):
+        if stop_event is not None and stop_event.is_set():
+            break
+        # Re-park the cursor every iteration so a stray hand on the
+        # mouse can't redirect wheel events mid-capture.
+        u.SetCursorPos(int(cx), int(cy))
+        # 0x0800 = MOUSEEVENTF_WHEEL. Negative delta scrolls the content
+        # *down* (i.e. viewport reveals lower content). We send several
+        # smaller events in a tight burst rather than one big jump.
+        for _ in range(SUB_EVENTS):
+            u.mouse_event(0x0800, 0, 0, sub_delta, 0)
+            time.sleep(sub_event_gap)
+        time.sleep(settle_time)
+
+        new_frame = _grab()
+        diff = float(np.mean(np.abs(
+            new_frame.astype(np.int32) - last_frame.astype(np.int32))))
+        if diff < 0.5:
+            # Frame didn't change → we've hit the bottom (or this window
+            # doesn't scroll). Stall twice in a row to be sure.
+            stall_count += 1
+            if stall_count >= 2:
+                break
+            continue
+        stall_count = 0
+        frames.append(new_frame)
+        last_frame = new_frame
+        if status_cb:
+            status_cb(f"Scrolling capture: frame {len(frames)}…")
+
+    if len(frames) == 1:
+        return Image.fromarray(frames[0])
+    if status_cb:
+        status_cb(f"Stitching {len(frames)} frames…")
+    return Image.fromarray(_stitch_frames(frames))
 
 
 def select_region(root: tk.Tk) -> tuple[int, int, int, int] | None:
@@ -561,6 +722,11 @@ class App:
         self._highlight_color  = "#fff200"
         self._highlight_mode   = tk.StringVar(value="auto")
         self._text_view_var    = tk.BooleanVar(value=False)
+        # When enabled, the global trigger drags a region then captures
+        # a vertically-scrolling screenshot of that region (in-process —
+        # we send wheel events and stitch the frames ourselves; no
+        # external dependency).
+        self._scrolling_capture_var = tk.BooleanVar(value=False)
 
         self._reader_win        = None
         self._reader_canvas     = None
@@ -685,6 +851,12 @@ class App:
         ttk.Checkbutton(gf, text="Use GPU — OCR  (requires CUDA)",
                         variable=self._gpu_ocr_var,
                         command=self._on_gpu_toggle).pack(anchor="w")
+
+        sf = ttk.Frame(self.root)
+        sf.pack(**pad)
+        ttk.Checkbutton(sf, text="Scrolling capture",
+                        variable=self._scrolling_capture_var,
+                        command=self._save_settings).pack(side=tk.LEFT)
 
         ttk.Button(self.root, text="⚙  Settings",
                    command=self._open_settings, width=28).pack(**pad)
@@ -828,6 +1000,12 @@ class App:
             legacy_gpu = bool(d.get("gpu", False))
             self._gpu_tts_var.set(bool(d.get("gpu_tts", legacy_gpu)))
             self._gpu_ocr_var.set(bool(d.get("gpu_ocr", legacy_gpu)))
+            # Migrate old `sharex_scrolling` key into the new
+            # `scrolling_capture` key — preserves the user's toggle state
+            # across the ShareX→in-process transition.
+            legacy_sharex = bool(d.get("sharex_scrolling", False))
+            self._scrolling_capture_var.set(
+                bool(d.get("scrolling_capture", legacy_sharex)))
         except Exception as exc:
             self._settings_load_error = (
                 f"Settings file had unexpected values "
@@ -849,6 +1027,7 @@ class App:
             "speed":           round(self._speed_var.get(), 2),
             "gpu_tts":         bool(self._gpu_tts_var.get()),
             "gpu_ocr":         bool(self._gpu_ocr_var.get()),
+            "scrolling_capture": bool(self._scrolling_capture_var.get()),
         }
         tmp = _SETTINGS_PATH + ".tmp"
         try:
@@ -1014,13 +1193,63 @@ class App:
             return
         if self._play_state != "idle":
             return
-        self.root.after(0, self._do_select)
+        if self._scrolling_capture_var.get():
+            # In-process scrolling capture: drag a region, then send
+            # mouse-wheel events and stitch the frames ourselves.
+            self.root.after(0, self._do_scrolling_capture)
+        else:
+            self.root.after(0, self._do_select)
 
     def _do_select(self):
         region = select_region(self.root)
         if not region:
             return
         self._begin_pipeline(region=region)
+
+    # ── In-process scrolling capture ──────────────────────────────────────────
+
+    def _do_scrolling_capture(self):
+        """Drag-region first (same UX as the non-scrolling path), then run
+        the in-process scroll-and-stitch capture in a background thread."""
+        region = select_region(self.root)
+        if not region:
+            return
+        # CRITICAL: clear stop_event before launching the worker. The
+        # previous reader window's close handler set stop_event=True
+        # via _stop(); without this clear, _capture_scrolling's first
+        # loop iteration would immediately break out and return a
+        # single-frame "capture" that looks indistinguishable from the
+        # non-scrolling drag-region mode. _begin_pipeline() clears
+        # stop_event too — but that runs *after* the capture, so it's
+        # too late.
+        self.stop_event.clear()
+        self.status_var.set(
+            "Scrolling capture starting — keep your cursor away from "
+            "the target window.")
+        threading.Thread(
+            target=self._scrolling_capture_worker,
+            args=(region,),
+            daemon=True,
+        ).start()
+
+    def _scrolling_capture_worker(self, region: tuple):
+        """Worker thread: run the wheel-and-stitch capture, then hand the
+        stitched image off to the standard pipeline (with `region` so the
+        reader window can align its top-left to the captured area —
+        identical to drag-region positioning)."""
+        try:
+            def _status(msg: str):
+                self.root.after(0, lambda m=msg: self.status_var.set(m))
+            img = _capture_scrolling(region,
+                                     stop_event=self.stop_event,
+                                     status_cb=_status)
+            self.root.after(0, lambda: self._begin_pipeline(
+                image=img, region=region, scrolling=True))
+        except Exception as exc:
+            import traceback
+            traceback.print_exc()
+            self.root.after(0, lambda e=exc: self.status_var.set(
+                f"Scrolling capture failed: {e.__class__.__name__}: {e}"))
 
     def _do_paste(self, event=None):
         # If focus is in an Entry/Text field (e.g. settings dialog), let the
@@ -1048,7 +1277,8 @@ class App:
             return
         self.status_var.set("Clipboard is empty (copy text or an image first)")
 
-    def _begin_pipeline(self, *, region=None, image=None, text=None):
+    def _begin_pipeline(self, *, region=None, image=None, text=None,
+                        scrolling=False):
         self.stop_event.clear()
         self._play_event.clear()
         self._full_audio = None
@@ -1078,7 +1308,8 @@ class App:
             self.root.after(100, self._tick_scan_timer)
         threading.Thread(
             target=self._generate,
-            kwargs={"region": region, "image": image, "text": text},
+            kwargs={"region": region, "image": image, "text": text,
+                    "scrolling": scrolling},
             daemon=True).start()
 
     def _tick_scan_timer(self):
@@ -1153,6 +1384,8 @@ class App:
             except tk.TclError: pass
 
     def _stop(self):
+        # stop_event is also checked inside _capture_scrolling, so this
+        # cleanly cancels an in-flight scrolling capture too.
         self.stop_event.set()
         self._play_event.clear()
         sd.stop()
@@ -1171,7 +1404,8 @@ class App:
 
     # ── Generation ────────────────────────────────────────────────────────────
 
-    def _generate(self, *, region=None, image=None, text=None):
+    def _generate(self, *, region=None, image=None, text=None,
+                  scrolling=False):
         try:
             if text is not None:
                 tokens = [t for t in text.split() if t]
@@ -1187,6 +1421,18 @@ class App:
             else:
                 if image is None:
                     image = ImageGrab.grab(bbox=region, all_screens=True)
+                # Cap image height to keep OCR + canvas display sane. A
+                # very tall scrolling capture (15k+ px) can crash native
+                # code in PIL / ONNX / Tk on systems with limited memory
+                # (segfault — no Python traceback). Resizing keeps the
+                # text legible (PP-OCRv5 mobile handles slight downscale
+                # fine) and the OCR runs much faster on a smaller image.
+                _MAX_OCR_HEIGHT = 6000
+                if image.size[1] > _MAX_OCR_HEIGHT:
+                    _scale = _MAX_OCR_HEIGHT / image.size[1]
+                    _new_w = max(1, int(image.size[0] * _scale))
+                    image = image.resize(
+                        (_new_w, _MAX_OCR_HEIGHT), Image.LANCZOS)
                 img_array = np.array(image)
                 # RapidOCR returns line-level polygons; _ocr collapses them
                 # to axis-aligned rects and splits each line into per-word
@@ -1231,7 +1477,8 @@ class App:
                 bg_hex, text_hex = _detect_image_colors(arr, disp_bboxes)
                 self.root.after(0, self._apply_highlight_color,
                                 optimal_highlight(bg_hex, text_hex))
-            self.root.after(0, self._show_reader, pil_img, disp_bboxes, region)
+            self.root.after(0, self._show_reader, pil_img, disp_bboxes,
+                            region, scrolling)
             self.root.after(0, self._set_scan_status, "Generating speech…")
 
             # Content-based alignment structures: match TTS words to OCR words
@@ -1466,7 +1713,8 @@ class App:
     # ── Reader window ─────────────────────────────────────────────────────────
 
     def _show_reader(self, pil_img: Image.Image, img_bboxes: list,
-                     region: tuple | None = None):
+                     region: tuple | None = None,
+                     scrolling: bool = False):
         if self.stop_event.is_set():
             return
         self._close_reader()
@@ -1488,9 +1736,74 @@ class App:
         win.attributes("-topmost", True)
         win.resizable(True, True)
 
-        cv = tk.Canvas(win, width=disp_w, height=disp_h,
-                       highlightthickness=0, bg="#1a1a1a")
-        cv.pack(fill=tk.BOTH, expand=True)
+        # Two layout modes:
+        #   scrolling=True  → in-process scrolling captures (the stitched
+        #                     image is often much taller than the screen).
+        #                     Window aligned to the captured region's
+        #                     top-left, height capped to fit on-screen,
+        #                     canvas placed in a vertically scrollable frame.
+        #   scrolling=False → drag-region / paste captures. Original layout:
+        #                     canvas at natural image size, no scrollbars;
+        #                     drag-region windows align to the captured
+        #                     region's origin, paste windows center on screen.
+        view_w = disp_w
+        view_h = disp_h
+        screen_w = self.root.winfo_screenwidth()
+        screen_h = self.root.winfo_screenheight()
+
+        if scrolling:
+            bottom_bar_h  = 115     # ~3 rows of controls
+            scrollbar_pad = 18      # tk Scrollbar thickness
+            # Window dimensions mirror drag-region (non-scrolling) mode:
+            # width = disp_w, top-left = region origin. The vertical
+            # scrollbar lives inside that width so the canvas viewport
+            # is ~18 px narrower; the rightmost strip of the image sits
+            # behind the scrollbar (typically trailing whitespace).
+            # Height: as much vertical space as is available below the
+            # region origin, capped so the bottom controls stay visible.
+            view_w = max(1, disp_w - scrollbar_pad)
+            if region:
+                available_h = max(200, screen_h - region[1] - 40)
+                total_h_preview = min(disp_h + bottom_bar_h, available_h)
+            else:
+                total_h_preview = min(disp_h + bottom_bar_h,
+                                      int(screen_h * 0.80))
+            view_h = max(1, total_h_preview - bottom_bar_h)
+
+            # Bottom bar packs FIRST with side=BOTTOM so it claims a fixed
+            # slot; the scrollable canvas frame fills everything above it.
+            bar = ttk.Frame(win)
+            bar.pack(side=tk.BOTTOM, fill=tk.X, padx=10, pady=(4, 4))
+
+            # Scrollable canvas: canvas + vbar only. No horizontal
+            # scrollbar (we set viewport width = image width).
+            canvas_frame = ttk.Frame(win)
+            canvas_frame.pack(fill=tk.BOTH, expand=True)
+
+            cv = tk.Canvas(canvas_frame, width=view_w, height=view_h,
+                           highlightthickness=0, bg="#1a1a1a",
+                           scrollregion=(0, 0, disp_w, disp_h))
+            vbar = ttk.Scrollbar(canvas_frame, orient="vertical",
+                                 command=cv.yview)
+            cv.configure(yscrollcommand=vbar.set)
+            cv.grid(row=0, column=0, sticky="nsew")
+            vbar.grid(row=0, column=1, sticky="ns")
+            canvas_frame.grid_rowconfigure(0, weight=1)
+            canvas_frame.grid_columnconfigure(0, weight=1)
+
+            # Mouse-wheel scrolls vertically. Tk uses event.delta in
+            # multiples of 120 on Windows.
+            cv.bind("<MouseWheel>",
+                    lambda e: cv.yview_scroll(int(-e.delta / 120), "units"))
+        else:
+            # Original drag-region / paste layout: canvas directly in the
+            # window at natural image size, no scrollbars, no scrollregion.
+            cv = tk.Canvas(win, width=disp_w, height=disp_h,
+                           highlightthickness=0, bg="#1a1a1a")
+            cv.pack(fill=tk.BOTH, expand=True)
+            bar = ttk.Frame(win)
+            bar.pack(fill=tk.X, padx=10, pady=(4, 4))
+
         cv.bind("<Button-1>", self._on_word_click)
         cv.bind("<Motion>",   self._on_canvas_motion)
 
@@ -1501,9 +1814,7 @@ class App:
         self._reader_base_img   = disp_img.copy()
         self._reader_canvas_img = img_id
 
-        # ── bottom bar ────────────────────────────────────────────────
-        bar = ttk.Frame(win)
-        bar.pack(fill=tk.X, padx=10, pady=(4, 4))
+        # ── bottom bar (already created above; populated below) ──────
 
         # Row 1: controls + status
         ctrl = ttk.Frame(bar)
@@ -1584,26 +1895,52 @@ class App:
         # Give the canvas default focus so shortcuts work immediately on open
         cv.focus_set()
 
-        total_h = disp_h + 115
-        if region:
-            # Drag-region flow: align canvas content (not the outer frame) with
-            # the top-left corner of the captured region. We set an initial
-            # geometry, let Tkinter compute the frame decorations, measure the
-            # offsets, then correct so content_origin == region origin.
-            wx, wy = region[0], region[1]
-            win.geometry(f"{disp_w}x{total_h}+{wx}+{wy}")
-            win.update_idletasks()
-            off_x = win.winfo_rootx() - win.winfo_x()
-            off_y = win.winfo_rooty() - win.winfo_y()
-            win.geometry(f"{disp_w}x{total_h}+{wx - off_x}+{wy - off_y}")
+        if scrolling:
+            # Same algorithm as drag-region (non-scrolling) — top-left
+            # aligned to the captured region's origin, with the
+            # window-frame border offsets corrected so the canvas
+            # content sits exactly where the user dragged. Height is
+            # capped so the bottom controls stay on-screen even if the
+            # stitched capture is much taller than the original region.
+            total_w = disp_w
+            if region:
+                wx, wy = region[0], region[1]
+                # Available vertical space below wy, with a small margin
+                # for the taskbar. Falls back to centered if there's
+                # almost no room below the region origin.
+                available_h = max(200, screen_h - wy - 40)
+                total_h = min(disp_h + 115, available_h)
+                win.geometry(f"{total_w}x{total_h}+{wx}+{wy}")
+                win.update_idletasks()
+                off_x = win.winfo_rootx() - win.winfo_x()
+                off_y = win.winfo_rooty() - win.winfo_y()
+                win.geometry(f"{total_w}x{total_h}+{wx - off_x}+{wy - off_y}")
+            else:
+                # Paste-image-into-scrolling-mode fallback (shouldn't
+                # happen with in-process capture but kept for safety).
+                total_h = min(disp_h + 115, int(screen_h * 0.80))
+                cx = max(0, (screen_w - disp_w) // 2)
+                cy = max(0, (screen_h - total_h) // 2)
+                win.geometry(f"{total_w}x{total_h}+{cx}+{cy}")
         else:
-            # Paste / no-region flow: center the window on the primary screen.
-            win.update_idletasks()
-            sw = win.winfo_screenwidth()
-            sh = win.winfo_screenheight()
-            cx = max(0, (sw - disp_w) // 2)
-            cy = max(0, (sh - total_h) // 2)
-            win.geometry(f"{disp_w}x{total_h}+{cx}+{cy}")
+            # Original behavior for drag-region / paste:
+            # - region != None  → align canvas content with the captured
+            #                     region's top-left (so it visually replaces
+            #                     the original text in place)
+            # - region == None  → center the natural-size window on screen
+            total_h = disp_h + 115
+            if region:
+                wx, wy = region[0], region[1]
+                win.geometry(f"{disp_w}x{total_h}+{wx}+{wy}")
+                win.update_idletasks()
+                off_x = win.winfo_rootx() - win.winfo_x()
+                off_y = win.winfo_rooty() - win.winfo_y()
+                win.geometry(f"{disp_w}x{total_h}+{wx - off_x}+{wy - off_y}")
+            else:
+                win.update_idletasks()
+                cx = max(0, (screen_w - disp_w) // 2)
+                cy = max(0, (screen_h - total_h) // 2)
+                win.geometry(f"{disp_w}x{total_h}+{cx}+{cy}")
         win.protocol("WM_DELETE_WINDOW", self._stop)
 
         self._reader_win        = win
@@ -1832,6 +2169,59 @@ class App:
             cv.tk_img = tk_img
         except tk.TclError:
             pass
+
+    def _scroll_into_view(self, bbox: tuple):
+        """If the given image-coord bbox isn't fully visible in the reader
+        canvas's current viewport, scroll the canvas vertically (and
+        horizontally if needed) to bring it back into view. No-op when
+        the image is smaller than the viewport in that dimension."""
+        cv = self._reader_canvas
+        if cv is None:
+            return
+        try:
+            sr = cv.cget("scrollregion")
+        except tk.TclError:
+            return
+        if not sr:
+            return
+        parts = str(sr).split()
+        if len(parts) < 4:
+            return
+        try:
+            sr_w = float(parts[2])
+            sr_h = float(parts[3])
+        except ValueError:
+            return
+        view_w = cv.winfo_width()
+        view_h = cv.winfo_height()
+        x1, y1, x2, y2 = bbox
+        # Vertical: scroll only when content overflows the viewport.
+        if view_h > 0 and sr_h > view_h:
+            try:
+                yfrac_top, yfrac_bot = cv.yview()
+            except tk.TclError:
+                yfrac_top, yfrac_bot = 0.0, 1.0
+            visible_top = yfrac_top * sr_h
+            visible_bot = yfrac_bot * sr_h
+            if y1 < visible_top or y2 > visible_bot:
+                # Park the word at about a third from the top — feels more
+                # natural while reading than pinning to the very top edge.
+                target = max(0.0, y1 - view_h / 3.0)
+                try: cv.yview_moveto(target / sr_h)
+                except tk.TclError: pass
+        # Horizontal: same logic, rarely needed for screen text but handy
+        # for very wide captures.
+        if view_w > 0 and sr_w > view_w:
+            try:
+                xfrac_left, _xfrac_right = cv.xview()
+            except tk.TclError:
+                xfrac_left = 0.0
+            visible_left = xfrac_left * sr_w
+            visible_right = visible_left + view_w
+            if x1 < visible_left or x2 > visible_right:
+                target = max(0.0, x1 - view_w / 3.0)
+                try: cv.xview_moveto(target / sr_w)
+                except tk.TclError: pass
 
     def _clear_highlight(self):
         cv   = self._reader_canvas
