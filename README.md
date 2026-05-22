@@ -16,6 +16,12 @@ A desktop OCR + neural-TTS pipeline with synchronized word highlighting, frame-a
 
 **[Quick Start](#quick-start) · [Features](#features) · [How It Works](#how-it-works) · [Troubleshooting](#troubleshooting)**
 
+### ▶ [Watch the demo](demo.mp4) (with sound)
+
+<video src="https://github.com/Shay-Ostrovsky/SelectAndRead/raw/master/demo.mp4" controls width="80%">
+Your browser can't show the inline player — <a href="demo.mp4">click here to watch the demo</a>.
+</video>
+
 </div>
 
 ---
