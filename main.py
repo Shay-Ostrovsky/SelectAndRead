@@ -915,47 +915,98 @@ class App:
         return not failed
 
     def _reregister_hotkeys(self):
+        """Library-level re-register: only clears Python-side state and
+        re-adds handlers. Does NOT reinstall the underlying Win32 hook,
+        so use _restart_keyboard_listener() when the OS hook may be dead."""
         try:
             keyboard.unhook_all_hotkeys()
         except Exception:
             pass
         self._register_hotkey()
 
-    def _hotkey_listener_alive(self) -> bool:
-        """Best-effort probe of the keyboard library's listener thread.
-        Different versions expose different attrs; if we can't tell, return
-        True so the caller leaves the hooks alone."""
+    def _restart_keyboard_listener(self) -> bool:
+        """Force the keyboard library's low-level Win32 hook to be reinstalled
+        from scratch. This is the *only* reliable way to recover from Windows
+        silently dropping the LL hook (which happens on session change, screen
+        lock/unlock, RDP transitions, sleep/resume, or LowLevelHooksTimeout).
+
+        The library's `unhook_all_hotkeys` + `add_hotkey` does NOT do this —
+        it only mutates Python-side dict state. The actual `SetWindowsHookEx`
+        call lives in the listener thread's message-pump loop, so to get a
+        fresh hook we have to make that thread exit and start a new one.
+
+        Strategy:
+          1. Find the listener thread (started by `threading.Thread(target=
+             listener.listen)`, no public reference — we walk
+             `threading.enumerate()` and match by `target.__self__`).
+          2. Post WM_QUIT to its thread ID. `GetMessageW` in the library's
+             message pump returns 0, the loop exits, `UnhookWindowsHookEx`
+             runs, the thread terminates.
+          3. Reset `listener.listening` to False so the next
+             `start_if_necessary()` actually starts a new thread (and a
+             fresh `SetWindowsHookEx` call).
+          4. Re-register our hotkeys, which triggers that re-start path.
+
+        Returns True if the restart sequence completed; False if we
+        couldn't find the thread (in which case the caller can fall back
+        to library-level re-register, which is at least better than nothing).
+        """
         try:
             listener = getattr(keyboard, "_listener", None)
             if listener is None:
                 return False
-            listening = getattr(listener, "listening", None)
-            if listening is not None:
-                return bool(listening)
-            is_alive = getattr(listener, "is_alive", None)
-            if callable(is_alive):
-                return bool(is_alive())
+            target_thread = None
+            for t in threading.enumerate():
+                if not t.is_alive():
+                    continue
+                target = getattr(t, "_target", None)
+                if target is None:
+                    continue
+                if getattr(target, "__self__", None) is listener:
+                    target_thread = t
+                    break
+            if target_thread is None or target_thread.ident is None:
+                return False
+            WM_QUIT = 0x0012
+            result = ctypes.windll.user32.PostThreadMessageW(
+                int(target_thread.ident), WM_QUIT, 0, 0)
+            if not result:
+                return False
+            target_thread.join(timeout=1.5)
+            try:
+                listener.listening = False
+            except Exception:
+                pass
+            self._register_hotkey()
+            return True
         except Exception:
-            pass
-        return True
+            return False
 
     def _hotkey_watchdog(self):
-        """Self-heal global hotkeys. Windows can silently drop low-level
-        keyboard hooks after long idle, session changes, screen-lock, or if
-        a callback ever overran the LowLevelHooksTimeout.
+        """Self-heal global hotkeys by force-reinstalling the Win32 hook.
 
-        Strategy:
-          - tick every 30 s
-          - re-register immediately if the listener thread is clearly dead
-          - re-register unconditionally every 5 min as a safety net against
-            silent drops the listener doesn't notice
-        This avoids the gap caused by unhook+rehook every 30 s while still
-        recovering from Windows' silent-drop case."""
+        Why this matters: Windows can silently drop our low-level keyboard
+        hook for several reasons (session change, screen lock/unlock, RDP
+        connect/disconnect, sleep/resume, LowLevelHooksTimeout). When it
+        does, the keyboard library has no idea — `_listener.listening` is
+        still True, the listener thread is still alive — but the OS has
+        stopped routing keystrokes to us. The only fix is to call
+        `SetWindowsHookEx` fresh, which requires a new listener thread.
+
+        We do that every 60 s (every 2 ticks of the 30 s scheduler).
+        Each restart blips for ~50–200 ms; a user is statistically very
+        unlikely to press the hotkey in that window, and the alternative
+        is hotkeys silently dying after long idle, which we know happens
+        repeatedly in practice.
+
+        If the deep restart fails (e.g. couldn't find the listener thread
+        on an unfamiliar keyboard-library version), fall back to the
+        library-level re-register so we at least try something."""
         self._watchdog_tick = getattr(self, "_watchdog_tick", 0) + 1
-        alive = self._hotkey_listener_alive()
-        if (not alive) or (self._watchdog_tick % 10 == 0):
+        if self._watchdog_tick % 2 == 0:
             try:
-                self._reregister_hotkeys()
+                if not self._restart_keyboard_listener():
+                    self._reregister_hotkeys()
             except Exception:
                 pass
         self.root.after(30_000, self._hotkey_watchdog)
