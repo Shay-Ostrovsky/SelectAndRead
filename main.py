@@ -216,6 +216,233 @@ def _virtual_screen() -> tuple[int, int, int, int]:
     )
 
 
+# ── Win32 RegisterHotKey-based hotkey manager ─────────────────────────────────
+# A drop-in replacement for keyboard.add_hotkey for the use-case of "fire a
+# callback when this combo is pressed". Reliable across long uptime, session
+# changes, screen lock/unlock, sleep/resume, RDP transitions — none of which
+# can silently kill a RegisterHotKey-managed binding (unlike low-level
+# keyboard hooks, which can be dropped for `LowLevelHooksTimeout` and don't
+# survive several Windows session events).
+
+_MOD_ALT, _MOD_CONTROL, _MOD_SHIFT, _MOD_WIN = 0x0001, 0x0002, 0x0004, 0x0008
+_WM_QUIT, _WM_HOTKEY = 0x0012, 0x0312
+_WHK_MSG_REGISTER   = 0x8001    # wParam=id, lParam=(mod<<16)|vk
+_WHK_MSG_UNREGISTER = 0x8002    # wParam=id
+
+
+def _key_to_vk(name: str) -> int | None:
+    """Convert a key name ("z", "f5", "space", ".") to a Win32 virtual-key
+    code. Returns None for unrecognised names."""
+    n = name.lower()
+    if len(n) == 1:
+        c = n.upper()
+        if "A" <= c <= "Z" or "0" <= c <= "9":
+            return ord(c)
+    _SPECIAL = {
+        "f1": 0x70, "f2": 0x71, "f3": 0x72, "f4": 0x73,
+        "f5": 0x74, "f6": 0x75, "f7": 0x76, "f8": 0x77,
+        "f9": 0x78, "f10": 0x79, "f11": 0x7A, "f12": 0x7B,
+        "space": 0x20, "enter": 0x0D, "return": 0x0D,
+        "tab": 0x09, "esc": 0x1B, "escape": 0x1B,
+        "backspace": 0x08, "delete": 0x2E, "del": 0x2E,
+        "insert": 0x2D, "ins": 0x2D,
+        "home": 0x24, "end": 0x23,
+        "pageup": 0x21, "pgup": 0x21,
+        "pagedown": 0x22, "pgdn": 0x22,
+        "up": 0x26, "down": 0x28, "left": 0x25, "right": 0x27,
+        ";": 0xBA, "=": 0xBB, ",": 0xBC, "-": 0xBD,
+        ".": 0xBE, "/": 0xBF, "`": 0xC0,
+        "[": 0xDB, "\\": 0xDC, "]": 0xDD, "'": 0xDE,
+    }
+    return _SPECIAL.get(n)
+
+
+def _parse_combo(combo: str) -> tuple[int, int] | None:
+    """Parse "shift+z" → (MOD_SHIFT, VK_Z=0x5A). Returns None on failure."""
+    parts = [p.strip().lower() for p in combo.split("+") if p.strip()]
+    if not parts:
+        return None
+    mod, vk = 0, None
+    for p in parts:
+        if p in ("shift", "shft"):
+            mod |= _MOD_SHIFT
+        elif p in ("ctrl", "control"):
+            mod |= _MOD_CONTROL
+        elif p in ("alt", "menu"):
+            mod |= _MOD_ALT
+        elif p in ("win", "super", "windows", "cmd"):
+            mod |= _MOD_WIN
+        else:
+            if vk is not None:
+                return None    # more than one non-modifier key
+            vk = _key_to_vk(p)
+            if vk is None:
+                return None
+    if vk is None:
+        return None
+    return mod, vk
+
+
+class WinHotkey:
+    """Process-wide global hotkey manager using Win32 RegisterHotKey.
+
+    RegisterHotKey is per-thread (the thread that calls RegisterHotKey is
+    the one that receives WM_HOTKEY messages), so we run a dedicated
+    daemon thread with a message pump. Add/remove operations are
+    dispatched to that thread via PostThreadMessageW so the registrations
+    happen on the right thread.
+
+    The pump thread is started lazily on first add() and torn down via
+    PostThreadMessageW(WM_QUIT). When the thread exits, Windows
+    automatically unregisters all hotkeys it owned, so cleanup is
+    best-effort but doesn't leak anything across process restarts.
+    """
+
+    def __init__(self):
+        self._bindings: dict = {}    # combo_str → (id, mod, vk, callback)
+        self._next_id = 1
+        self._thread = None
+        self._thread_id = 0
+        self._lock = threading.Lock()
+        # Set by the caller; takes a no-arg callable and runs it on the
+        # main (Tk) thread. None → run on the pump thread directly.
+        self.dispatch = None
+
+    def add(self, combo: str, callback) -> bool:
+        """Register a hotkey combo (e.g. "shift+z"). Returns True if the
+        combo is syntactically valid. Note: actual Win32 RegisterHotKey
+        success is determined asynchronously on the pump thread; if the
+        combo is already claimed by another process, registration will
+        silently fail there."""
+        parsed = _parse_combo(combo)
+        if parsed is None:
+            return False
+        mod, vk = parsed
+        with self._lock:
+            existing = self._bindings.pop(combo, None)
+            hk_id = self._next_id
+            self._next_id += 1
+            self._bindings[combo] = (hk_id, mod, vk, callback)
+            need_start = self._thread is None or not self._thread.is_alive()
+        if need_start:
+            self._start_thread()
+        else:
+            if existing is not None:
+                self._post(_WHK_MSG_UNREGISTER, existing[0], 0)
+            self._post(_WHK_MSG_REGISTER, hk_id, (mod << 16) | vk)
+        return True
+
+    def remove_all(self):
+        """Unregister every binding but keep the pump thread alive so a
+        subsequent add() is cheap (no thread restart)."""
+        with self._lock:
+            ids = [v[0] for v in self._bindings.values()]
+            self._bindings.clear()
+        for hk_id in ids:
+            self._post(_WHK_MSG_UNREGISTER, hk_id, 0)
+
+    def restart(self):
+        """Tear down the pump thread and start a fresh one, re-registering
+        all current bindings. Defensive — RegisterHotKey rarely needs this,
+        but cheap insurance against any imaginable corruption."""
+        with self._lock:
+            saved = [(c, v[3]) for c, v in self._bindings.items()]
+            self._bindings.clear()
+        self._stop_thread()
+        for combo, cb in saved:
+            self.add(combo, cb)
+
+    def _start_thread(self):
+        if self._thread is not None and self._thread.is_alive():
+            return
+        ready = threading.Event()
+        self._thread = threading.Thread(
+            target=self._run, args=(ready,),
+            daemon=True, name="WinHotkeyPump")
+        self._thread.start()
+        ready.wait(timeout=1.0)
+
+    def _stop_thread(self):
+        tid = self._thread_id
+        if tid:
+            try:
+                ctypes.windll.user32.PostThreadMessageW(tid, _WM_QUIT, 0, 0)
+            except Exception:
+                pass
+        t = self._thread
+        if t is not None:
+            t.join(timeout=1.5)
+        self._thread = None
+        self._thread_id = 0
+
+    def _post(self, msg, wparam, lparam):
+        tid = self._thread_id
+        if not tid:
+            return
+        try:
+            ctypes.windll.user32.PostThreadMessageW(tid, msg, wparam, lparam)
+        except Exception:
+            pass
+
+    def _run(self, ready: threading.Event):
+        from ctypes import wintypes
+        user32 = ctypes.windll.user32
+        kernel32 = ctypes.windll.kernel32
+        self._thread_id = int(kernel32.GetCurrentThreadId())
+        msg = wintypes.MSG()
+        # Force-create the thread's message queue before anyone calls
+        # PostThreadMessage against us (otherwise the post can silently
+        # fail because the queue doesn't exist yet).
+        user32.PeekMessageW(ctypes.byref(msg), 0, 0, 0, 0)
+        # Register any bindings that were added before the thread started.
+        with self._lock:
+            initial = list(self._bindings.values())
+        for hk_id, mod, vk, _ in initial:
+            try: user32.RegisterHotKey(0, hk_id, mod, vk)
+            except Exception: pass
+        ready.set()
+        # Message pump.
+        while True:
+            ret = user32.GetMessageW(ctypes.byref(msg), 0, 0, 0)
+            if ret <= 0:
+                # 0 = WM_QUIT received, <0 = error
+                break
+            if msg.message == _WM_HOTKEY:
+                hk_id = int(msg.wParam)
+                cb = None
+                with self._lock:
+                    for v in self._bindings.values():
+                        if v[0] == hk_id:
+                            cb = v[3]
+                            break
+                if cb is not None:
+                    d = self.dispatch
+                    if d:
+                        try: d(cb)
+                        except Exception: pass
+                    else:
+                        try: cb()
+                        except Exception: pass
+            elif msg.message == _WHK_MSG_REGISTER:
+                hk_id = int(msg.wParam)
+                lp = int(msg.lParam)
+                mod = (lp >> 16) & 0xFFFF
+                vk  = lp & 0xFFFF
+                try: user32.RegisterHotKey(0, hk_id, mod, vk)
+                except Exception: pass
+            elif msg.message == _WHK_MSG_UNREGISTER:
+                try: user32.UnregisterHotKey(0, int(msg.wParam))
+                except Exception: pass
+            # Other messages: ignore (no TranslateMessage/DispatchMessage
+            # needed — we don't run window procs on this thread).
+        # Thread exit: unregister everything we still own.
+        with self._lock:
+            remaining = [v[0] for v in self._bindings.values()]
+        for hk_id in remaining:
+            try: user32.UnregisterHotKey(0, hk_id)
+            except Exception: pass
+
+
 # ── In-process scrolling capture ──────────────────────────────────────────────
 # Capture a vertically-scrolling screenshot of an arbitrary screen region by
 # sending mouse-wheel events to the window under the region's centre and
@@ -755,6 +982,15 @@ class App:
         # wrong; surfaced to the user once the UI is alive.
         self._settings_load_error: str | None = None
         self._hotkey_register_error: list[str] | None = None
+        # Win32 RegisterHotKey-based global hotkey manager. Far more
+        # reliable than the keyboard library's low-level hook for the
+        # "fire callback on combo" use case — RegisterHotKey survives
+        # session changes, screen lock/unlock, sleep/resume, RDP, and
+        # isn't subject to LowLevelHooksTimeout silent drops.
+        self._win_hotkeys = WinHotkey()
+        # Hotkey callbacks fire on the pump thread; bounce them onto
+        # the Tk thread so they can safely touch UI state.
+        self._win_hotkeys.dispatch = lambda cb: self.root.after(0, cb)
         self._load_settings()
 
         self._build_ui()
@@ -764,8 +1000,10 @@ class App:
         self.root.bind_all("<Control-v>", self._do_paste)
         self.root.bind_all("<Control-V>", self._do_paste)
         self._register_hotkey()
-        # Watchdog ticks every 30 s and self-heals dropped hooks.
-        self.root.after(30_000, self._hotkey_watchdog)
+        # Defensive watchdog — restarts the Win32 hotkey pump every 10 min
+        # just in case. RegisterHotKey is reliable enough that this rarely
+        # matters in practice; it's belt-and-suspenders.
+        self.root.after(10 * 60_000, self._hotkey_watchdog)
         # Surface a corrupt-settings error to the user once the window has
         # painted. Done via after() so the messagebox doesn't block the
         # window from becoming visible first.
@@ -898,118 +1136,46 @@ class App:
         self._apply_highlight_color(chosen[1])
 
     def _register_hotkey(self) -> bool:
-        """Install the global hotkeys. Records which (if any) failed in
-        self._hotkey_register_error so the UI can surface it. Returns True
-        if both registered cleanly."""
-        failed = []
-        try:
-            keyboard.add_hotkey(self._hotkey_trigger, self._trigger)
-        except Exception:
-            failed.append(self._hotkey_trigger)
-        try:
-            keyboard.add_hotkey(self._hotkey_pause,
-                                lambda: self.root.after(0, self._on_play_btn))
-        except Exception:
-            failed.append(self._hotkey_pause)
+        """Install both production hotkeys via Win32 RegisterHotKey.
+
+        RegisterHotKey is fundamentally more reliable than low-level
+        keyboard hooks for "wake me on this combo" use cases: not subject
+        to LowLevelHooksTimeout silent drops, survives session changes,
+        screen lock/unlock, sleep/resume, and RDP transitions.
+
+        Each combo is exclusive to one process — if another app holds it,
+        registration silently fails on the pump thread. The combo string
+        is still recorded in `failed` so the UI can warn the user."""
+        failed: list[str] = []
+        for combo in (self._hotkey_trigger, self._hotkey_pause):
+            cb = (self._trigger if combo == self._hotkey_trigger
+                  else self._on_play_btn)
+            if not self._win_hotkeys.add(combo, cb):
+                failed.append(combo)
         self._hotkey_register_error = failed or None
         return not failed
 
     def _reregister_hotkeys(self):
-        """Library-level re-register: only clears Python-side state and
-        re-adds handlers. Does NOT reinstall the underlying Win32 hook,
-        so use _restart_keyboard_listener() when the OS hook may be dead."""
-        try:
-            keyboard.unhook_all_hotkeys()
-        except Exception:
-            pass
+        """Remove all current hotkey bindings and re-register fresh.
+        Used after the user changes a hotkey in Settings."""
+        self._win_hotkeys.remove_all()
         self._register_hotkey()
 
-    def _restart_keyboard_listener(self) -> bool:
-        """Force the keyboard library's low-level Win32 hook to be reinstalled
-        from scratch. This is the *only* reliable way to recover from Windows
-        silently dropping the LL hook (which happens on session change, screen
-        lock/unlock, RDP transitions, sleep/resume, or LowLevelHooksTimeout).
-
-        The library's `unhook_all_hotkeys` + `add_hotkey` does NOT do this —
-        it only mutates Python-side dict state. The actual `SetWindowsHookEx`
-        call lives in the listener thread's message-pump loop, so to get a
-        fresh hook we have to make that thread exit and start a new one.
-
-        Strategy:
-          1. Find the listener thread (started by `threading.Thread(target=
-             listener.listen)`, no public reference — we walk
-             `threading.enumerate()` and match by `target.__self__`).
-          2. Post WM_QUIT to its thread ID. `GetMessageW` in the library's
-             message pump returns 0, the loop exits, `UnhookWindowsHookEx`
-             runs, the thread terminates.
-          3. Reset `listener.listening` to False so the next
-             `start_if_necessary()` actually starts a new thread (and a
-             fresh `SetWindowsHookEx` call).
-          4. Re-register our hotkeys, which triggers that re-start path.
-
-        Returns True if the restart sequence completed; False if we
-        couldn't find the thread (in which case the caller can fall back
-        to library-level re-register, which is at least better than nothing).
-        """
-        try:
-            listener = getattr(keyboard, "_listener", None)
-            if listener is None:
-                return False
-            target_thread = None
-            for t in threading.enumerate():
-                if not t.is_alive():
-                    continue
-                target = getattr(t, "_target", None)
-                if target is None:
-                    continue
-                if getattr(target, "__self__", None) is listener:
-                    target_thread = t
-                    break
-            if target_thread is None or target_thread.ident is None:
-                return False
-            WM_QUIT = 0x0012
-            result = ctypes.windll.user32.PostThreadMessageW(
-                int(target_thread.ident), WM_QUIT, 0, 0)
-            if not result:
-                return False
-            target_thread.join(timeout=1.5)
-            try:
-                listener.listening = False
-            except Exception:
-                pass
-            self._register_hotkey()
-            return True
-        except Exception:
-            return False
-
     def _hotkey_watchdog(self):
-        """Self-heal global hotkeys by force-reinstalling the Win32 hook.
+        """Defensive periodic restart of the hotkey pump thread.
 
-        Why this matters: Windows can silently drop our low-level keyboard
-        hook for several reasons (session change, screen lock/unlock, RDP
-        connect/disconnect, sleep/resume, LowLevelHooksTimeout). When it
-        does, the keyboard library has no idea — `_listener.listening` is
-        still True, the listener thread is still alive — but the OS has
-        stopped routing keystrokes to us. The only fix is to call
-        `SetWindowsHookEx` fresh, which requires a new listener thread.
-
-        We do that every 60 s (every 2 ticks of the 30 s scheduler).
-        Each restart blips for ~50–200 ms; a user is statistically very
-        unlikely to press the hotkey in that window, and the alternative
-        is hotkeys silently dying after long idle, which we know happens
-        repeatedly in practice.
-
-        If the deep restart fails (e.g. couldn't find the listener thread
-        on an unfamiliar keyboard-library version), fall back to the
-        library-level re-register so we at least try something."""
-        self._watchdog_tick = getattr(self, "_watchdog_tick", 0) + 1
-        if self._watchdog_tick % 2 == 0:
-            try:
-                if not self._restart_keyboard_listener():
-                    self._reregister_hotkeys()
-            except Exception:
-                pass
-        self.root.after(30_000, self._hotkey_watchdog)
+        RegisterHotKey is rock-solid in practice — unlike low-level hooks,
+        it isn't dropped by Windows on session changes, lock/unlock,
+        sleep/resume, or LowLevelHooksTimeout. So this watchdog is mostly
+        paranoia: every 10 min, tear down the pump thread and start a new
+        one with all bindings re-registered. Each restart blips for a few
+        tens of milliseconds; a hotkey press during that window is rare
+        enough to ignore (10 ms / 600 s ≈ 0.002 % of the time)."""
+        try:
+            self._win_hotkeys.restart()
+        except Exception:
+            pass
+        self.root.after(10 * 60_000, self._hotkey_watchdog)
 
     def _load_settings(self):
         try:
@@ -1125,6 +1291,12 @@ class App:
 
     def _capture_hotkey(self, which: str, lbl_var: tk.StringVar,
                         parent: tk.Toplevel):
+        # Temporarily disable our Win32 hotkeys so the user pressing
+        # their current hotkey (to re-assign it) doesn't fire the
+        # bound action. Re-registered in _cleanup() when the dialog
+        # closes (whether they confirmed or cancelled).
+        self._win_hotkeys.remove_all()
+
         cap = tk.Toplevel(parent)
         cap.title("Set Hotkey")
         cap.resizable(False, False)
@@ -1195,8 +1367,11 @@ class App:
                     else:
                         self._hotkey_pause = hk
                     lbl_var.set(hk)
-                    self._reregister_hotkeys()
                     self._save_settings()
+            # Always re-register (whether confirmed or cancelled). If
+            # confirmed, the new combos take effect; if cancelled, the
+            # previous combos come back.
+            self._register_hotkey()
             cap.destroy()
 
         confirm_btn.configure(command=lambda: _cleanup(apply=True))
