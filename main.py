@@ -166,6 +166,78 @@ def _ocr(img_array: np.ndarray) -> list[tuple[str, tuple]]:
     return out
 
 
+def _dedupe_words(words: list[tuple[str, tuple]],
+                  y_tol: int = 8, x_tol: int = 8
+                  ) -> list[tuple[str, tuple]]:
+    """Remove near-duplicate words from a list — used after chunked OCR
+    where words sitting in the overlap region between two chunks get
+    detected twice. Two entries are "the same" if their bbox top-lefts
+    are within (x_tol, y_tol) pixels AND the words match (case-insensitive)."""
+    sorted_words = sorted(words, key=lambda w: (w[1][1], w[1][0]))
+    deduped: list[tuple[str, tuple]] = []
+    for word, bbox in sorted_words:
+        x1, y1, x2, y2 = bbox
+        is_dup = False
+        # Scan recent additions within the y-tolerance band; entries past
+        # that band are too far up the page to be duplicates of this one.
+        for i in range(len(deduped) - 1, -1, -1):
+            other_word, (ox1, oy1, ox2, oy2) = deduped[i]
+            if oy1 < y1 - y_tol:
+                break
+            if (abs(ox1 - x1) <= x_tol and
+                abs(oy1 - y1) <= y_tol and
+                other_word.lower() == word.lower()):
+                is_dup = True
+                break
+        if not is_dup:
+            deduped.append((word, bbox))
+    return deduped
+
+
+def _ocr_image_chunked(image: "Image.Image",
+                      chunk_height: int = 3000,
+                      overlap: int = 120,
+                      ) -> list[tuple[str, tuple]]:
+    """OCR an image at native resolution, chunking vertically when it's
+    too tall to OCR in one pass without hurting accuracy.
+
+    Why this matters: RapidOCR (and PP-OCR generally) internally resize
+    the input image to fit a target size before detection. For a tall
+    capture like 1200×12000, that internal resize squashes the text so
+    badly that recognition starts misreading. By feeding the model a
+    series of 1200×3000 chunks at native resolution, every character
+    keeps its original pixel size.
+
+    Returns (word, (x1, y1, x2, y2)) tuples in *original-image* pixel
+    coordinates — chunk y-offsets are added back here so the caller can
+    use the bboxes against the full image."""
+    w, h = image.size
+    img_array_full = np.array(image)
+    # Small enough → single pass, no chunking overhead.
+    if h <= chunk_height + overlap:
+        word_data = _ocr(img_array_full)
+        return [(word, _tighten_x_bbox(img_array_full, *b))
+                for word, b in word_data]
+
+    all_words: list[tuple[str, tuple]] = []
+    y = 0
+    while y < h:
+        y2 = min(y + chunk_height, h)
+        chunk_arr = img_array_full[y:y2]
+        word_data = _ocr(chunk_arr)
+        # Tighten against the chunk (cheaper than slicing the full
+        # array each time) then shift y back to global coords.
+        for word, b in word_data:
+            b_tight = _tighten_x_bbox(chunk_arr, *b)
+            x1, by1, x2, by2 = b_tight
+            all_words.append((word, (x1, by1 + y, x2, by2 + y)))
+        if y2 >= h:
+            break
+        y = y2 - overlap   # overlap keeps lines at chunk boundaries readable
+
+    return _dedupe_words(all_words)
+
+
 def _load_models(on_status: callable, on_done: callable, on_error: callable,
                  gpu_tts: bool = False, gpu_ocr: bool = False) -> None:
     global _ocr_reader, _tts_pipeline
@@ -952,8 +1024,11 @@ class App:
         # When enabled, the global trigger drags a region then captures
         # a vertically-scrolling screenshot of that region (in-process —
         # we send wheel events and stitch the frames ourselves; no
-        # external dependency).
+        # external dependency). Max frames bounds how far down the page
+        # we'll scroll — the capture also stops earlier if the page
+        # stops changing.
         self._scrolling_capture_var = tk.BooleanVar(value=False)
+        self._scrolling_max_frames_var = tk.IntVar(value=40)
 
         self._reader_win        = None
         self._reader_canvas     = None
@@ -1095,6 +1170,16 @@ class App:
         ttk.Checkbutton(sf, text="Scrolling capture",
                         variable=self._scrolling_capture_var,
                         command=self._save_settings).pack(side=tk.LEFT)
+        ttk.Label(sf, text="  Max scrolls:").pack(side=tk.LEFT, padx=(8, 0))
+        _max_spin = ttk.Spinbox(
+            sf, from_=1, to=200, increment=5, width=4,
+            textvariable=self._scrolling_max_frames_var)
+        _max_spin.pack(side=tk.LEFT)
+        # Save whenever the user adjusts the value (any of: spinbox
+        # arrows, typed-in + Enter / FocusOut).
+        for _evt in ("<<Increment>>", "<<Decrement>>",
+                     "<Return>", "<FocusOut>"):
+            _max_spin.bind(_evt, lambda _e: self._save_settings())
 
         ttk.Button(self.root, text="⚙  Settings",
                    command=self._open_settings, width=28).pack(**pad)
@@ -1223,6 +1308,11 @@ class App:
             legacy_sharex = bool(d.get("sharex_scrolling", False))
             self._scrolling_capture_var.set(
                 bool(d.get("scrolling_capture", legacy_sharex)))
+            try:
+                self._scrolling_max_frames_var.set(
+                    int(d.get("scrolling_max_frames", 40)))
+            except (TypeError, ValueError):
+                self._scrolling_max_frames_var.set(40)
         except Exception as exc:
             self._settings_load_error = (
                 f"Settings file had unexpected values "
@@ -1245,6 +1335,7 @@ class App:
             "gpu_tts":         bool(self._gpu_tts_var.get()),
             "gpu_ocr":         bool(self._gpu_ocr_var.get()),
             "scrolling_capture": bool(self._scrolling_capture_var.get()),
+            "scrolling_max_frames": int(self._scrolling_max_frames_var.get()),
         }
         tmp = _SETTINGS_PATH + ".tmp"
         try:
@@ -1466,9 +1557,18 @@ class App:
         try:
             def _status(msg: str):
                 self.root.after(0, lambda m=msg: self.status_var.set(m))
+            # Read the user-chosen max-frames cap fresh on each trigger so
+            # the spinbox change takes effect immediately. Clamp to a sane
+            # range in case someone edited the settings file by hand.
+            try:
+                max_frames = max(1, min(200, int(
+                    self._scrolling_max_frames_var.get())))
+            except (TypeError, ValueError, tk.TclError):
+                max_frames = 40
             img = _capture_scrolling(region,
                                      stop_event=self.stop_event,
-                                     status_cb=_status)
+                                     status_cb=_status,
+                                     max_frames=max_frames)
             self.root.after(0, lambda: self._begin_pipeline(
                 image=img, region=region, scrolling=True))
         except Exception as exc:
@@ -1647,26 +1747,18 @@ class App:
             else:
                 if image is None:
                     image = ImageGrab.grab(bbox=region, all_screens=True)
-                # Cap image height to keep OCR + canvas display sane. A
-                # very tall scrolling capture (15k+ px) can crash native
-                # code in PIL / ONNX / Tk on systems with limited memory
-                # (segfault — no Python traceback). Resizing keeps the
-                # text legible (PP-OCRv5 mobile handles slight downscale
-                # fine) and the OCR runs much faster on a smaller image.
-                _MAX_OCR_HEIGHT = 6000
-                if image.size[1] > _MAX_OCR_HEIGHT:
-                    _scale = _MAX_OCR_HEIGHT / image.size[1]
-                    _new_w = max(1, int(image.size[0] * _scale))
-                    image = image.resize(
-                        (_new_w, _MAX_OCR_HEIGHT), Image.LANCZOS)
                 img_array = np.array(image)
-                # RapidOCR returns line-level polygons; _ocr collapses them
-                # to axis-aligned rects and splits each line into per-word
-                # boxes proportionally by character count.
-                word_data = _ocr(img_array)
-                # Pixel-tight each bbox so highlights snap to the ink columns.
-                word_data = [(w, _tighten_x_bbox(img_array, *b))
-                             for w, b in word_data]
+                # Chunked OCR at native resolution. The previous version
+                # proportionally rescaled tall captures to ≤6000 px tall,
+                # which halved character pixel height on a 1200×12000
+                # stitched scroll capture and wrecked OCR accuracy on
+                # small body text — and made the reader window narrower
+                # than the user's drag region too, since we then handed
+                # the resized image to _show_reader. _ocr_image_chunked
+                # vertically splits the image (with overlap) and OCRs
+                # each chunk at full resolution, then merges with
+                # bbox-y offsets in original-image coordinates.
+                word_data = _ocr_image_chunked(image)
 
                 if not word_data:
                     self.root.after(0, self._abort_generation, "No text detected")
