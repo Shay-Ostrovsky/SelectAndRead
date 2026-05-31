@@ -1091,6 +1091,11 @@ class App:
         # spoken text only — e.g. ["API", "A P I"], ["PyTorch", "pie torch"].
         # The displayed/highlighted words are never altered.
         self._pron_overrides: list = []
+        # Auto-scroll: when on, the scrolling-capture reader scrolls itself
+        # to keep the highlighted word in view as TTS reads. Only has an
+        # effect in the scrolling reader (the only one with a scrollable
+        # canvas); the checkbox is shown there. Persisted across sessions.
+        self._autoscroll_var = tk.BooleanVar(value=True)
         # Two independent GPU toggles. TTS = Kokoro on torch CUDA;
         # OCR = RapidOCR on onnxruntime-gpu. Either or both may be CUDA;
         # at runtime each falls back to CPU if its backend is missing.
@@ -1353,6 +1358,7 @@ class App:
                     if _frm.strip():
                         _clean_ov.append([_frm, _to])
             self._pron_overrides = _clean_ov
+            self._autoscroll_var.set(bool(d.get("autoscroll", True)))
             # Legacy `gpu` flag (single toggle) becomes the default for both
             # new split toggles when an older settings file is loaded.
             legacy_gpu = bool(d.get("gpu", False))
@@ -1393,6 +1399,7 @@ class App:
             "scrolling_capture": bool(self._scrolling_capture_var.get()),
             "scrolling_max_frames": int(self._scrolling_max_frames_var.get()),
             "pron_overrides":  list(self._pron_overrides),
+            "autoscroll":      bool(self._autoscroll_var.get()),
         }
         tmp = _SETTINGS_PATH + ".tmp"
         try:
@@ -2362,6 +2369,15 @@ class App:
         ttk.Button(ctrl, text="📋  Copy", command=self._copy_text,
                    width=9).pack(side=tk.LEFT, padx=(0, 8))
 
+        # Auto-scroll toggle — only meaningful in the scrolling reader
+        # (the one with a scrollable canvas), so only shown there. When
+        # ticked, the canvas follows the highlighted word as TTS reads.
+        if scrolling:
+            ttk.Checkbutton(
+                ctrl, text="Auto-scroll",
+                variable=self._autoscroll_var,
+                command=self._save_settings).pack(side=tk.LEFT, padx=(0, 8))
+
         sv = tk.StringVar(value="Generating speech…")
         ttk.Label(ctrl, textvariable=sv, foreground="gray").pack(side=tk.LEFT)
 
@@ -2699,6 +2715,10 @@ class App:
             tk_img = self._draw_highlight(base, bboxes[idx])
             cv.itemconfig(iid, image=tk_img)
             cv.tk_img = tk_img
+            # Keep the active word in view when auto-scroll is enabled.
+            # No-op on the non-scrolling reader (no scrollregion set).
+            if self._autoscroll_var.get():
+                self._scroll_into_view(bboxes[idx])
         except tk.TclError:
             pass
 
