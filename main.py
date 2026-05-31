@@ -892,6 +892,45 @@ def _norm(w: str) -> str:
     return ''.join(c.lower() for c in w if c.isalnum())
 
 
+def _override_map(pairs) -> dict:
+    """Build {normalized_key: replacement} from a list of [from, to] pairs.
+    Keys are normalized with _norm so "API", "api", "Api" all match the
+    same override. Later pairs win on key collision. Pairs with an empty
+    key or empty replacement are skipped."""
+    omap: dict = {}
+    for pair in pairs or []:
+        try:
+            frm, to = pair[0], pair[1]
+        except (TypeError, IndexError, KeyError):
+            continue
+        key = _norm(frm)
+        repl = str(to).strip()
+        if key and repl:
+            omap[key] = repl
+    return omap
+
+
+def _apply_overrides(words: list[str], omap: dict) -> list[str]:
+    """Apply pronunciation overrides to a token list, for the SPOKEN text
+    only (the displayed/highlighted words are never changed).
+
+    A token whose normalized form is in `omap` is replaced by the
+    override's replacement string, split into tokens — so a single OCR
+    word can expand to several spoken words (e.g. "API" → "A P I" or
+    "PyTorch" → "pie torch"). Tokens with no override pass through
+    unchanged."""
+    if not omap:
+        return list(words)
+    out: list[str] = []
+    for w in words:
+        repl = omap.get(_norm(w))
+        if repl is not None:
+            out.extend(repl.split())
+        else:
+            out.append(w)
+    return out
+
+
 def _tts_safe(words: list[str]) -> str:
     """
     Build TTS input text from OCR words.
@@ -1048,6 +1087,10 @@ class App:
         self._hotkey_trigger    = "shift+z"
         self._hotkey_pause      = "shift+x"
         self._voice_id          = VOICES[0][0]
+        # Pronunciation overrides: list of [from, to] pairs. Applied to the
+        # spoken text only — e.g. ["API", "A P I"], ["PyTorch", "pie torch"].
+        # The displayed/highlighted words are never altered.
+        self._pron_overrides: list = []
         # Two independent GPU toggles. TTS = Kokoro on torch CUDA;
         # OCR = RapidOCR on onnxruntime-gpu. Either or both may be CUDA;
         # at runtime each falls back to CPU if its backend is missing.
@@ -1297,6 +1340,19 @@ class App:
             self._highlight_mode.set(d.get("highlight_mode", "auto"))
             self._text_view_var.set(bool(d.get("text_view", False)))
             self._speed_var.set(float(d.get("speed", 1.0)))
+            # Pronunciation overrides — normalize to a list of [from, to]
+            # string pairs, dropping anything malformed.
+            _raw_ov = d.get("pron_overrides", [])
+            _clean_ov = []
+            if isinstance(_raw_ov, list):
+                for _p in _raw_ov:
+                    try:
+                        _frm, _to = str(_p[0]), str(_p[1])
+                    except (TypeError, IndexError, KeyError):
+                        continue
+                    if _frm.strip():
+                        _clean_ov.append([_frm, _to])
+            self._pron_overrides = _clean_ov
             # Legacy `gpu` flag (single toggle) becomes the default for both
             # new split toggles when an older settings file is loaded.
             legacy_gpu = bool(d.get("gpu", False))
@@ -1336,6 +1392,7 @@ class App:
             "gpu_ocr":         bool(self._gpu_ocr_var.get()),
             "scrolling_capture": bool(self._scrolling_capture_var.get()),
             "scrolling_max_frames": int(self._scrolling_max_frames_var.get()),
+            "pron_overrides":  list(self._pron_overrides),
         }
         tmp = _SETTINGS_PATH + ".tmp"
         try:
@@ -1377,8 +1434,119 @@ class App:
                        "pause", pause_var, dlg)
                    ).grid(row=1, column=2, padx=(4, 16))
 
+        ttk.Separator(dlg, orient="horizontal").grid(
+            row=2, column=0, columnspan=3, sticky="ew", padx=16, pady=(4, 8))
+        ttk.Button(dlg, text="🗣  Pronunciation overrides…",
+                   command=lambda: self._open_pron_overrides(dlg)
+                   ).grid(row=3, column=0, columnspan=3, padx=16, pady=(0, 4))
+
         ttk.Button(dlg, text="Close", command=dlg.destroy).grid(
-            row=2, column=0, columnspan=3, pady=(0, 14))
+            row=4, column=0, columnspan=3, pady=(8, 14))
+
+    def _open_pron_overrides(self, parent: tk.Toplevel):
+        """Editor for pronunciation overrides. Each row maps a word (as it
+        appears in the text) to how it should be spoken. The replacement is
+        sent to the TTS engine instead of the original word; the displayed
+        and highlighted text is never changed.
+
+        Examples:
+          API       →  A P I          (spell out an acronym)
+          PyTorch   →  pie torch      (fix a mispronunciation)
+          k8s       →  kubernetes     (expand an abbreviation)
+        """
+        dlg = tk.Toplevel(parent)
+        dlg.title("Pronunciation overrides")
+        dlg.resizable(False, True)
+        dlg.attributes("-topmost", True)
+        dlg.grab_set()
+
+        ttk.Label(
+            dlg,
+            text=("Map a word to how it should be spoken.\n"
+                  "Only the audio changes — the on-screen text and "
+                  "highlighting stay the same."),
+            justify="left", padding=(14, 12, 14, 6)).pack(anchor="w")
+
+        # Scrollable area holding the rows.
+        body = ttk.Frame(dlg)
+        body.pack(fill=tk.BOTH, expand=True, padx=12)
+        canvas = tk.Canvas(body, highlightthickness=0, width=420, height=240)
+        vbar = ttk.Scrollbar(body, orient="vertical", command=canvas.yview)
+        rows_frame = ttk.Frame(canvas)
+        rows_frame.bind(
+            "<Configure>",
+            lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+        canvas.create_window((0, 0), window=rows_frame, anchor="nw")
+        canvas.configure(yscrollcommand=vbar.set)
+        canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        vbar.pack(side=tk.RIGHT, fill=tk.Y)
+        canvas.bind(
+            "<MouseWheel>",
+            lambda e: canvas.yview_scroll(int(-e.delta / 120), "units"))
+
+        # Live list of (from_var, to_var) for the rows currently shown.
+        row_vars: list[tuple[tk.StringVar, tk.StringVar]] = []
+
+        # Header.
+        hdr = ttk.Frame(rows_frame)
+        hdr.grid(row=0, column=0, sticky="w", pady=(0, 4))
+        ttk.Label(hdr, text="Word in text", width=20,
+                  font=("Segoe UI", 9, "bold")).grid(row=0, column=0, padx=(0, 4))
+        ttk.Label(hdr, text="Spoken as", width=20,
+                  font=("Segoe UI", 9, "bold")).grid(row=0, column=2, padx=(4, 0))
+
+        def _add_row(frm="", to=""):
+            fv, tv = tk.StringVar(value=frm), tk.StringVar(value=to)
+            row_vars.append((fv, tv))
+            rf = ttk.Frame(rows_frame)
+            rf.grid(sticky="w", pady=2)
+            ttk.Entry(rf, textvariable=fv, width=20).grid(
+                row=0, column=0, padx=(0, 4))
+            ttk.Label(rf, text="→").grid(row=0, column=1)
+            ttk.Entry(rf, textvariable=tv, width=20).grid(
+                row=0, column=2, padx=(4, 4))
+
+            def _remove():
+                if (fv, tv) in row_vars:
+                    row_vars.remove((fv, tv))
+                rf.destroy()
+
+            ttk.Button(rf, text="✕", width=3, command=_remove).grid(
+                row=0, column=3)
+            canvas.after_idle(
+                lambda: canvas.configure(scrollregion=canvas.bbox("all")))
+
+        # Seed with existing overrides (or one blank row to start).
+        if self._pron_overrides:
+            for pair in self._pron_overrides:
+                try:
+                    _add_row(str(pair[0]), str(pair[1]))
+                except (TypeError, IndexError):
+                    continue
+        else:
+            _add_row()
+
+        # Bottom button bar.
+        btns = ttk.Frame(dlg)
+        btns.pack(fill=tk.X, padx=12, pady=(8, 12))
+        ttk.Button(btns, text="＋  Add row",
+                   command=lambda: _add_row()).pack(side=tk.LEFT)
+
+        def _save():
+            new_pairs = []
+            for fv, tv in row_vars:
+                frm = fv.get().strip()
+                to  = tv.get().strip()
+                if frm and to:
+                    new_pairs.append([frm, to])
+            self._pron_overrides = new_pairs
+            self._save_settings()
+            dlg.destroy()
+
+        ttk.Button(btns, text="Cancel",
+                   command=dlg.destroy).pack(side=tk.RIGHT)
+        ttk.Button(btns, text="Save",
+                   command=_save).pack(side=tk.RIGHT, padx=(0, 6))
 
     def _capture_hotkey(self, which: str, lbl_var: tk.StringVar,
                         parent: tk.Toplevel):
@@ -1733,12 +1901,16 @@ class App:
     def _generate(self, *, region=None, image=None, text=None,
                   scrolling=False):
         try:
+            # Pronunciation overrides (normalized key → spoken replacement).
+            # Applied to the spoken text in both input branches below; the
+            # displayed/highlighted words are never altered.
+            omap = _override_map(self._pron_overrides)
             if text is not None:
                 tokens = [t for t in text.split() if t]
                 if not tokens:
                     self.root.after(0, self._abort_generation, "No text to read")
                     return
-                tts_text = _tts_safe(tokens)
+                tts_text = _tts_safe(_apply_overrides(tokens, omap))
                 ocr_words = [w for w in tokens if any(c.isalnum() for c in w)]
                 if not ocr_words:
                     self.root.after(0, self._abort_generation, "No readable text")
@@ -1767,7 +1939,7 @@ class App:
                 # TTS text: all tokens (punctuation attached to preceding words by
                 # _tts_safe so Kokoro gets "Hello, world." not "Hello , world .").
                 all_ocr_words = [w for w, _ in word_data]
-                tts_text = _tts_safe(all_ocr_words)
+                tts_text = _tts_safe(_apply_overrides(all_ocr_words, omap))
 
                 # Alignment/highlighting: only tokens with alphanumeric content.
                 # Pure-punctuation tokens have no bbox worth highlighting.
@@ -1809,6 +1981,39 @@ class App:
             for _i, _nn in enumerate(ocr_norms):
                 if _nn:
                     ocr_lookup.setdefault(_nn, []).append(_i)
+            # Pronunciation overrides change what Kokoro SAYS, so the spoken
+            # words won't content-match their original OCR word. Register
+            # each replacement word's norm against the OCR index it came
+            # from, so highlighting still lands on the right word. For a
+            # multi-word expansion ("API" → "A P I") the first spoken word
+            # schedules the highlight; the rest are recorded here as
+            # `override_expansion_norms` so the alignment loop can skip them
+            # (keeping the original word highlighted) instead of drifting
+            # the positional cursor onto the next OCR word.
+            override_expansion_norms: set = set()
+            if omap:
+                for _i, _key in enumerate(ocr_norms):
+                    _repl = omap.get(_key)
+                    if not _repl:
+                        continue
+                    # Register ONLY the first replacement word against this
+                    # OCR index. The content matcher then maps the spoken
+                    # expansion's first word to the right occurrence (and,
+                    # via the used-set, the next occurrence of the same
+                    # override word to ITS index). Registering every
+                    # replacement word would let the extra words of one
+                    # expansion wrongly grab a *later* occurrence's index.
+                    # All replacement words still go in the skip-set so the
+                    # non-first ones are passed over (keeping the original
+                    # word highlighted) rather than positional-drifting.
+                    _rwords = _repl.split()
+                    for _j, _rw in enumerate(_rwords):
+                        _rn = _norm(_rw)
+                        if not _rn:
+                            continue
+                        override_expansion_norms.add(_rn)
+                        if _j == 0:
+                            ocr_lookup.setdefault(_rn, []).append(_i)
             used_ocr = set()   # OCR indices already scheduled
             seq_oi   = 0       # sequential cursor: next expected OCR position
 
@@ -1859,6 +2064,15 @@ class App:
                             # globally (handles deferred/late TTS segments).
                             fwd = [i for i in cands if i >= seq_oi]
                             tgt = fwd[0] if fwd else cands[0]
+                        elif sn in override_expansion_norms:
+                            # Extra word of a multi-word pronunciation
+                            # expansion whose target OCR word was already
+                            # scheduled by an earlier word of the same
+                            # expansion. Skip it: the original word stays
+                            # highlighted (the highlight persists until the
+                            # next scheduled word) and we avoid drifting the
+                            # positional cursor onto the following word.
+                            continue
                         else:
                             # No content match — positional fallback
                             while (local_oi < len(ocr_words) and
