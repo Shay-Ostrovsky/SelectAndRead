@@ -1978,52 +1978,26 @@ class App:
                             region, scrolling)
             self.root.after(0, self._set_scan_status, "Generating speech…")
 
-            # Content-based alignment structures: match TTS words to OCR words
-            # by normalised text rather than by position.  This handles the case
-            # where Kokoro defers a word (e.g. "from" near "PubMed®") to a late
-            # segment — the word still gets mapped to its correct OCR index and
-            # highlighted at the actual audio timestamp.
-            ocr_norms  = [_norm(w) for w in ocr_words]
-            ocr_lookup = {}                          # norm → [ocr_indices …]
-            for _i, _nn in enumerate(ocr_norms):
-                if _nn:
-                    ocr_lookup.setdefault(_nn, []).append(_i)
-            # Pronunciation overrides change what Kokoro SAYS, so the spoken
-            # words won't content-match their original OCR word. Register
-            # each replacement word's norm against the OCR index it came
-            # from, so highlighting still lands on the right word. For a
-            # multi-word expansion ("API" → "A P I") the first spoken word
-            # schedules the highlight; the rest are recorded here as
-            # `override_expansion_norms` so the alignment loop can skip them
-            # (keeping the original word highlighted) instead of drifting
-            # the positional cursor onto the next OCR word.
-            override_expansion_norms: set = set()
-            if omap:
-                for _i, _key in enumerate(ocr_norms):
-                    _repl = omap.get(_key)
-                    if not _repl:
-                        continue
-                    # Register ONLY the first replacement word against this
-                    # OCR index. The content matcher then maps the spoken
-                    # expansion's first word to the right occurrence (and,
-                    # via the used-set, the next occurrence of the same
-                    # override word to ITS index). Registering every
-                    # replacement word would let the extra words of one
-                    # expansion wrongly grab a *later* occurrence's index.
-                    # All replacement words still go in the skip-set so the
-                    # non-first ones are passed over (keeping the original
-                    # word highlighted) rather than positional-drifting.
-                    _rwords = _repl.split()
-                    for _j, _rw in enumerate(_rwords):
-                        _rn = _norm(_rw)
-                        if not _rn:
-                            continue
-                        override_expansion_norms.add(_rn)
-                        if _j == 0:
-                            ocr_lookup.setdefault(_rn, []).append(_i)
-            used_ocr = set()   # OCR indices already scheduled
-            seq_oi   = 0       # sequential cursor: next expected OCR position
+            # Sequential local-lookahead alignment: map spoken words from Kokoro
+            # to OCR words in reading order. Uses a small bounded lookahead window
+            # so OCR typos or phonetic variations never cause the highlight to jump
+            # to distant occurrences of the same word elsewhere on the page.
+            ocr_norms = [_norm(w) for w in ocr_words]
+            num_ocr = len(ocr_words)
+            curr_oi = 0
+            LOOKAHEAD = 4
 
+            # Pre-compute spoken word norms for OCR words with pronunciation overrides
+            override_norms_per_ocr: dict[int, list[str]] = {}
+            if omap:
+                for _i, _norm_w in enumerate(ocr_norms):
+                    if _norm_w in omap:
+                        _repl_words = omap[_norm_w].split()
+                        override_norms_per_ocr[_i] = [
+                            _norm(_rw) for _rw in _repl_words if _norm(_rw)
+                        ]
+
+            last_tgt: int | None = None
             audio_chunks: list = []
             schedule: list[tuple[int, float]] = []
             running = 0.0
@@ -2052,50 +2026,62 @@ class App:
                 seg_words = seg_text.split()
 
                 if seg_words:
-                    starts   = _word_starts(tokens, seg_words, duration)
-                    local_oi = seq_oi
-                    hi_water = seq_oi - 1
+                    starts = _word_starts(tokens, seg_words, duration)
 
                     for si, sw in enumerate(seg_words):
                         sn = _norm(sw)
                         if not sn:
                             continue          # skip punctuation-only TTS tokens
 
-                        # Find the best unscheduled OCR word that matches this
-                        # TTS word by content.
-                        cands = [i for i in ocr_lookup.get(sn, [])
-                                 if i not in used_ocr]
-                        if cands:
-                            # Prefer the earliest candidate at/after seq_oi
-                            # (normal forward flow); fall back to any candidate
-                            # globally (handles deferred/late TTS segments).
-                            fwd = [i for i in cands if i >= seq_oi]
-                            tgt = fwd[0] if fwd else cands[0]
-                        elif sn in override_expansion_norms:
-                            # Extra word of a multi-word pronunciation
-                            # expansion whose target OCR word was already
-                            # scheduled by an earlier word of the same
-                            # expansion. Skip it: the original word stays
-                            # highlighted (the highlight persists until the
-                            # next scheduled word) and we avoid drifting the
-                            # positional cursor onto the following word.
-                            continue
-                        else:
-                            # No content match — positional fallback
-                            while (local_oi < len(ocr_words) and
-                                   (not ocr_norms[local_oi] or
-                                    local_oi in used_ocr)):
-                                local_oi += 1
-                            tgt = local_oi if local_oi < len(ocr_words) else None
+                        tgt: int | None = None
+
+                        # 1. Lookahead in small local window [curr_oi, curr_oi + LOOKAHEAD]
+                        best_match: int | None = None
+                        end_window = min(num_ocr, curr_oi + LOOKAHEAD + 1)
+                        for k in range(curr_oi, end_window):
+                            k_norm = ocr_norms[k]
+                            if not k_norm:
+                                continue
+                            if sn == k_norm:
+                                best_match = k
+                                break
+                            if k in override_norms_per_ocr:
+                                rep_list = override_norms_per_ocr[k]
+                                if rep_list and sn == rep_list[0]:
+                                    best_match = k
+                                    break
+                            if k_norm.startswith(sn) and len(sn) >= 2:
+                                best_match = k
+                                break
+
+                        if best_match is not None:
+                            tgt = best_match
+                            curr_oi = best_match + 1
+                        elif last_tgt is not None:
+                            # 2. If no lookahead match, check if sn is a continuation of
+                            # the previous word's expansion (multi-word override,
+                            # compound/subword, or number expansion)
+                            if last_tgt in override_norms_per_ocr:
+                                rep_list = override_norms_per_ocr[last_tgt]
+                                if len(rep_list) > 1 and sn in rep_list[1:]:
+                                    tgt = last_tgt
+                            elif ocr_norms[last_tgt] and sn in ocr_norms[last_tgt]:
+                                tgt = last_tgt
+                            elif any(c.isdigit() for c in ocr_words[last_tgt]):
+                                tgt = last_tgt
+
+                        if tgt is None:
+                            # 3. Positional fallback: assign to the current sequential
+                            # OCR word without jumping ahead
+                            if curr_oi < num_ocr:
+                                tgt = curr_oi
+                                curr_oi += 1
+                            elif num_ocr > 0:
+                                tgt = num_ocr - 1
 
                         if tgt is not None and si < len(starts):
                             schedule.append((tgt, running + starts[si]))
-                            used_ocr.add(tgt)
-                            hi_water = max(hi_water, tgt)
-                            if tgt >= local_oi:
-                                local_oi = tgt + 1
-
-                    seq_oi = max(seq_oi, hi_water + 1)
+                            last_tgt = tgt
 
                 audio_chunks.append(audio)
                 running += duration
